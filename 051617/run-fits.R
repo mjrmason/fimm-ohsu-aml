@@ -62,6 +62,8 @@ if(!is.na(num.cores) && (num.cores > 1)) {
   registerDoMC(cores=(num.cores-1))
 }
 
+cat("Fit _all_ OHSU drug response data\n")
+
 ## BSW add min response (min) as a parameter
 dss <- function(ic50,slope,max,min.conc.tested,max.conc.tested,y.arg=10,DSS.type=2,concn_scale=1e-9, min.response=0){
   #rdata should be in in format containing IC50, SLOPE, MAX,MIN.Concentration,MAX.Concentration
@@ -893,16 +895,10 @@ filter.drug.response.fits <- function(fits.df, min.gof = 0, remove.non.finite.ic
   fits.df
 }
 
-## Fit FIMM drug response curves
-cat("Fitting FIMM drug response data\n")
+## common.drugs.tested <- intersect(unique(ohsu.raw.drug.data$ID_Drug), unique(fimm.raw.drug.data$DRUG_ID))
 
-common.drugs.tested <- intersect(unique(ohsu.raw.drug.data$ID_Drug), unique(fimm.raw.drug.data$DRUG_ID))
-
-cat("Common drugs\n")
-print(common.drugs.tested)
-
-fimm.raw.drug.data <- subset(fimm.raw.drug.data, DRUG_ID %in% common.drugs.tested)
-fimm.fits <- fit.fimm.drug.response.data(fimm.raw.drug.data)
+## cat("Common drugs\n")
+## print(common.drugs.tested)
 
 ## sort( sapply(ls(),function(x){object.size(get(x))})) 
 
@@ -910,26 +906,10 @@ fimm.fits <- fit.fimm.drug.response.data(fimm.raw.drug.data)
 cat("Fitting OHSU drug response data\n")
 
 print(colnames(ohsu.raw.drug.data))
-ohsu.raw.drug.data <- subset(ohsu.raw.drug.data, ID_Drug %in% common.drugs.tested)
+## ohsu.raw.drug.data <- subset(ohsu.raw.drug.data, ID_Drug %in% common.drugs.tested)
 ohsu.fits <- fit.ohsu.drug.response.data(ohsu.raw.drug.data)
 
-## Collate the results
-tmp <- lapply(fimm.fits, function(x) x$tbl)
-fimm.fits.tbl <- do.call("rbind", tmp)
-
-tmp <- lapply(fimm.fits, function(x) x$id)
-fimm.fits.id <- do.call("rbind", tmp)
-
-fimm.fits.df <- cbind(fimm.fits.tbl, fimm.fits.id)
-if(!(all(rownames(fimm.fits.tbl) == rownames(fimm.fits.id)))) {
-  warning("UNEXPECTED fimm.fits.tbl rownames != fimm.fits.id rownames\n")
-}
-if(!(all(rownames(fimm.fits.tbl) == rownames(fimm.fits.df)))) {
-  warning("UNEXPECTED fimm.fits.tbl rownames != fimm.fits.df rownames\n")
-}
-rm(fimm.fits.tbl)
-rm(fimm.fits.id)
-gc()
+cat("Done with OHSU drug response fits\n")
 
 tmp <- lapply(ohsu.fits, function(x) x$tbl)
 ohsu.fits.tbl <- do.call("rbind", tmp)
@@ -947,6 +927,36 @@ if(!(all(rownames(ohsu.fits.tbl) == rownames(ohsu.fits.df)))) {
 rm(ohsu.fits.tbl)
 rm(ohsu.fits.id)
 rm(tmp)
+gc()
+
+save.image(".RData.ohsu.fits")
+cat("Done saving OHSU fits\n")
+stop("stop")
+
+## Fit FIMM drug response curves
+## cat("Fitting FIMM drug response data\n")
+
+## fimm.raw.drug.data <- subset(fimm.raw.drug.data, DRUG_ID %in% common.drugs.tested)
+fimm.fits <- fit.fimm.drug.response.data(fimm.raw.drug.data)
+
+
+
+## Collate the results
+tmp <- lapply(fimm.fits, function(x) x$tbl)
+fimm.fits.tbl <- do.call("rbind", tmp)
+
+tmp <- lapply(fimm.fits, function(x) x$id)
+fimm.fits.id <- do.call("rbind", tmp)
+
+fimm.fits.df <- cbind(fimm.fits.tbl, fimm.fits.id)
+if(!(all(rownames(fimm.fits.tbl) == rownames(fimm.fits.id)))) {
+  warning("UNEXPECTED fimm.fits.tbl rownames != fimm.fits.id rownames\n")
+}
+if(!(all(rownames(fimm.fits.tbl) == rownames(fimm.fits.df)))) {
+  warning("UNEXPECTED fimm.fits.tbl rownames != fimm.fits.df rownames\n")
+}
+rm(fimm.fits.tbl)
+rm(fimm.fits.id)
 gc()
 
 ## Add ensembl identifiers to the drug annotation table

@@ -1,3 +1,27 @@
+bioc.packages <- c("nplr", "openxlsx", "drc", "minpack.lm", "maftools", "vcd", "binom")
+
+install.bioc.packages.auto <- function(x) { 
+  x <- as.character(x)
+  print(x)
+##  if(isTRUE(x %in% .packages(all.available=TRUE))) { 
+##    eval(parse(text = sprintf("require(\"%s\")", x)))
+##  } else { 
+##    #update.packages(ask= FALSE) #update installed packages.
+##    eval(parse(text = sprintf("install.packages(\"%s\", dependencies = TRUE)", x)))
+##  }
+
+  if(isTRUE(x %in% .packages(all.available=TRUE))) { 
+    eval(parse(text = sprintf("require(\"%s\")", x)))
+  } else {
+    source("http://bioconductor.org/biocLite.R")
+    #biocLite(character(), ask=FALSE) #update installed packages.
+    eval(parse(text = sprintf("biocLite(\"%s\")", x)))
+    eval(parse(text = sprintf("require(\"%s\")", x)))
+  }
+}
+
+d <- unlist(lapply(bioc.packages, install.bioc.packages.auto))
+
 suppressPackageStartupMessages(library("nplr"))
 suppressPackageStartupMessages(library("foreach"))
 suppressPackageStartupMessages(library("parallel"))
@@ -11,6 +35,8 @@ suppressPackageStartupMessages(library("gridExtra"))
 suppressPackageStartupMessages(library("caTools"))
 suppressPackageStartupMessages(library("data.table"))
 suppressPackageStartupMessages(library("maftools"))
+suppressPackageStartupMessages(library("binom"))
+suppressPackageStartupMessages(library("vcd")) ## for mosaic / plot contingency
 
 library(ggbeeswarm)
 library(plyr)
@@ -273,7 +299,8 @@ correlate.expression.with.ic50 <- function(drug.df, drug.id.col, drugs.to.test, 
                            if((gene.sd == 0) || !is.finite(gene.sd)) { gene.sd <- 1 }
                            gene.expr <- ( gene.expr - mean(gene.expr[is.finite(gene.expr)], na.rm=TRUE) ) / gene.sd
                          }
-                         wt <- wilcox.test(gene.expr, resp$IC50, paired=TRUE)
+                         ## wt <- wilcox.test(gene.expr, resp$IC50, paired=TRUE)
+                         wt <- cor.test(gene.expr, resp$IC50, method="spearman")
                          p <- wt$p.value
                          num.unique.samples <- length(unique(common.samples))
                          num.samples <- length(common.samples)
@@ -332,12 +359,20 @@ if(zscore.drug.data) {
   fimm.fits.df$IC50 <- fimm.fits.df$IC50.z
 }
 
+min.avg.log.cpm <- 1
+cat(paste0("Ensuring avg log CPM > ", min.avg.log.cpm, "\n"))
+flag <- unlist(apply(ohsu.expr.data, 1, function(row) mean(row, na.rm=TRUE) > min.avg.log.cpm))
+ohsu.expr.data <- ohsu.expr.data[flag, ]
+
+flag <- unlist(apply(fimm.expr.data, 1, function(row) mean(row, na.rm=TRUE) > min.avg.log.cpm))
+fimm.expr.data <- fimm.expr.data[flag, ]
+
 if(zscore.expr.data) {
   cat("Zscoring OHSU expression data\n")
-  ohsu.expr.data <- scale(ohsu.expr.data, center = TRUE, scale = TRUE)
+  ohsu.expr.data <- t(scale(t(ohsu.expr.data), center = TRUE, scale = TRUE))
   
   cat("Zscoring FIMM expression data\n")
-  fimm.expr.data <- scale(fimm.expr.data, center = TRUE, scale = TRUE)
+  fimm.expr.data <- t(scale(t(fimm.expr.data), center = TRUE, scale = TRUE))
 }
 
 ohsu.rna.replicates <- rnaseq.sample.summary.tbl$PatientID
@@ -401,7 +436,168 @@ fimm.expr.corr <- correlate.expression.with.ic50(drug.df = fimm.fits.df, drug.id
 cat("Done correlating expression with IC50 for FIMM\n")
 cat("Done with expression\n")
 save.image(".RData")
+
+ohsu.fimm.expr.corr <- merge(ohsu.expr.corr, fimm.expr.corr, by.x = c("ID_Drug", "gene"), by.y = c("DRUG_ID", "gene"), suffixes = c(".ohsu", ".fimm"))
+
+ohsu.fimm.expr.corr$pval.fimm <- as.numeric(ohsu.fimm.expr.corr$pval.fimm)
+ohsu.fimm.expr.corr$pval.ohsu <- as.numeric(ohsu.fimm.expr.corr$pval.ohsu)
+
+## Plot pvalue distributions of FIMM and OHSU
+pdf("ohsu-fimm-expr-pval-dist.pdf")
+g1 <- ggplot(ohsu.fimm.expr.corr, aes(x=pval.fimm)) + geom_histogram(boundary=0, bins=100) + xlab("FIMM p-value") 
+## g1 <- g1 + scale_y_log10() + ylab("Log10 Count")
+g2 <- ggplot(ohsu.fimm.expr.corr, aes(x=pval.ohsu)) + geom_histogram(boundary=0, bins=100) + xlab("OHSU p-value")
+## g2 <- g2 + scale_y_log10() + ylab("Log10 Count")
+grid.arrange(g1, g2)
+d <- dev.off()
+
+ohsu.fimm.expr.corr$drug.gene <- unlist(apply(ohsu.fimm.expr.corr[,c("ID_Drug", "gene")], 1, function(row) paste0(row[1], "-", row[2])))
+## Make Venn diagram of FIMM vs OHSU significant
+vennList = list("FIMM p < 0.05"=ohsu.fimm.expr.corr$drug.gene[ohsu.fimm.expr.corr$pval.fimm < 0.05], "OHSU p < 0.05"=ohsu.fimm.expr.corr$drug.gene[ohsu.fimm.expr.corr$pval.ohsu < 0.05])
+pdf("ohsu-fimm-sig-venn.pdf")
+venn(vennList)
+d <- dev.off()
+
+## ohsu.expr.corr <- correlate.expression.with.ic50(drug.df = ohsu.fits.df, drug.id.col = "ID_Drug", genes.to.test = common.genes, drugs.to.test = common.drugs.tested, expr.mat = ohsu.expr.data, specimen.id.col = "SeqID", patient.id.col = "patient_id", zscore.response = FALSE, zscore.expression = FALSE)
+
+plot.expr.vs.ic50 <- function(df, drug, ensg.gene, expr.mat, xlab, ylab, drug.id.col = "DRUG_ID", patient.id.col = "PATIENT_ID", specimen.id.col = "SCREEN_ID") {
+  df.drug <- df[df[,drug.id.col] == drug,]
+  ids <- df.drug[, specimen.id.col]
+  resp <- data.frame(IC50 = df.drug$IC50, PATIENT_ID = df.drug[, patient.id.col], id = ids)
+  resp <- resp[!is.infinite(resp$IC50) & !is.nan(resp$IC50) & !is.na(resp$IC50),]
+  common.samples <- intersect(resp$id, colnames(expr.mat))
+  flag <- resp$id %in% common.samples
+  resp <- resp[flag,]
+  tmp <- as.data.frame(table(resp$PATIENT_ID))
+  colnames(tmp) <- c("PATIENT_ID", "weight")
+  tmp$weight <- 1/sqrt(tmp$weight)
+  resp <- merge(resp, tmp)
+  common.samples <- as.character(resp$id)
+  if(!(ensg.gene %in% rownames(expr.mat))) {
+    warning(paste0("UNEXPECTED: ", ensg.gene, " not in expr.mat\n"))
+  }
+  if(!(all(common.samples %in% colnames(expr.mat)))) {
+    warning("UNEXPECTED columns not in expr.mat\n")
+  }
+  gene.expr <- as.vector(unlist(expr.mat[ensg.gene, common.samples]))
+  df <- data.frame(expr = gene.expr, resp = resp$IC50, weights=resp$weight)
+  ggplot(df, aes(x = expr, y = resp, weight=weights)) + 
+    geom_point() + 
+    xlab(xlab) + ylab(ylab) +
+    stat_smooth(method = "lm", col = "red")  
+}
+
+old.nrow <- nrow(ohsu.fimm.expr.corr)
+ohsu.fimm.expr.corr <- merge(ohsu.fimm.expr.corr, unique(ohsu.fimm.drugs[,c("ID_Drug", "DRUG_NAME")]))
+if(old.nrow != nrow(ohsu.fimm.expr.corr)) {
+  warning("UNEXPECTED drug correlation results grew\n")
+}
+
+ensg.to.symbols.mapping <- function(ensg.ids) {
+  # Get a mapping from ensembl id to gene symbol
+  ensembl = useMart("ensembl",dataset="hsapiens_gene_ensembl")
+  bm <- getBM(attributes=c('hgnc_symbol', 'ensembl_gene_id'), 
+              filters = 'ensembl_gene_id', 
+              values = ensg.ids, 
+              mart = ensembl)
+  names(bm) <- c("SYMBOL", "ENSG")
+  bm <- bm[!(bm$ENSG %in% c("")),]
+  bm
+}
+
+
+all.symbols <- unique(ohsu.fimm.expr.corr$gene)
+ensg.to.sym <- ensg.to.symbols.mapping(all.symbols)
+
+old.nrow <- nrow(ohsu.fimm.expr.corr)
+ohsu.fimm.expr.corr.gene <- merge(ohsu.fimm.expr.corr, unique(ensg.to.sym), by.x = "gene", by.y = "ENSG")
+
+## For both data sets, plot the fraction of hits for each drug (with error bars)
+frac.ohsu.hits <- ddply(ohsu.fimm.expr.corr, "DRUG_NAME",
+                        .fun = function(df) {
+                          num.hits <- length(which(df$pval.ohsu < 0.05))
+                          num <- nrow(df)
+                          bb <- binom.bayes(x = num.hits, n = num)
+                          v <- c(bb$mean, bb$lower, bb$upper)
+                          names(v) <- c("mean", "lower", "upper")
+                          v
+                        })
+
+frac.fimm.hits <- ddply(ohsu.fimm.expr.corr, "DRUG_NAME",
+                        .fun = function(df) {
+                          num.hits <- length(which(df$pval.fimm < 0.05))
+                          num <- nrow(df)
+                          bb <- binom.bayes(x = num.hits, n = num)
+                          v <- c(bb$mean, bb$lower, bb$upper)
+                          names(v) <- c("mean", "lower", "upper")
+                          v
+                        })
+
+frac.fimm.hits$dataset <- "FIMM"
+frac.ohsu.hits$dataset <- "OHSU"
+frac.fimm.ohsu.hits <- rbind(frac.fimm.hits, frac.ohsu.hits)
+frac.fimm.ohsu.hits <- frac.fimm.ohsu.hits[order(frac.fimm.ohsu.hits$mean, decreasing=FALSE),]
+frac.fimm.ohsu.hits <- subset(frac.fimm.ohsu.hits, ( DRUG_NAME %in% frac.fimm.hits$DRUG_NAME ) & ( DRUG_NAME %in% frac.ohsu.hits$DRUG_NAME ))
+frac.fimm.ohsu.hits$DRUG_NAME <- factor(frac.fimm.ohsu.hits$DRUG_NAME, levels = frac.fimm.ohsu.hits$DRUG_NAME[frac.fimm.ohsu.hits$dataset == "OHSU"])
+
+p <- ggplot(frac.fimm.ohsu.hits, aes(x=DRUG_NAME, y=mean, fill=dataset)) + 
+  geom_bar(stat="identity", color="black", 
+           position=position_dodge()) +
+  ylab("Fraction significant (p < 0.05)") +
+  geom_errorbar(aes(ymin=lower, ymax=upper), width=.2,
+                 position=position_dodge(.9)) 
+p <- p + theme(axis.text.x = element_text(angle = 90))
+pdf("fimm-ohsu-sig-drugs.pdf")
+print(p)
+d <- dev.off()
+
+save.image(".RData")
 cat("Saved image\n")
+stop("stop")
+
+both.sig <- subset(ohsu.fimm.expr.corr.gene, (pval.ohsu < 0.05) & (pval.fimm < 0.05))
+both.sig <- both.sig[order(both.sig$pval.ohsu, both.sig$pval.fimm),]
+
+## Output at most one sig hit from each drug
+indices <- 1:nrow(both.sig)
+indices <- indices[!duplicated(both.sig$DRUG_NAME)]
+
+for(i in indices[1:10]) {
+  drug.id <- both.sig$ID_Drug[i]
+  ensg.gene <- both.sig$gene[i]
+  drug.name <- both.sig$DRUG_NAME[i]
+  gene.name <- both.sig$SYMBOL[i]
+  drug.col <- "DRUG_ID"
+  pt.col <- "PATIENT_ID"
+  spec.col <- "SCREEN_ID"
+  xlab <- paste0(gene.name, " expression (log CPM zscore)")
+  ylab <- paste0(drug.name, " IC50 (zscore)")
+  pdf(paste0("correlation-", drug.name, "-", gene.name, "-", i, ".pdf"))
+  g1 <- plot.expr.vs.ic50(fimm.fits.df, drug.id, ensg.gene, fimm.expr.data, xlab = xlab, ylab = ylab, drug.id.col = drug.col, patient.id.col = pt.col, specimen.id.col = spec.col)
+  g1 <- g1 + ggtitle(paste0("FIMM: ", drug.name, " IC50 vs ", gene.name, " expression"))
+  drug.col <- "ID_Drug"
+  pt.col <- "patient_id"
+  spec.col <- "SeqID"
+  g2 <- plot.expr.vs.ic50(ohsu.fits.df, drug.id, ensg.gene, ohsu.expr.data, xlab = xlab, ylab = ylab, drug.id.col = drug.col, patient.id.col = pt.col, specimen.id.col = spec.col)
+  g2 <- g2 + ggtitle(paste0("OHSU: ", drug.name, " IC50 vs ", gene.name, " expression"))
+  grid.arrange(g1, g2)
+  d <- dev.off()
+}
+
+tab <- table(ohsu.fimm.expr.corr$pval.ohsu < 0.05, ohsu.fimm.expr.corr$pval.fimm < 0.05, dnn=c("OHSU", "FIMM"))
+require(vcd)
+pdf("ohsu-fimm-sig-contingency.pdf")
+labs <- round(prop.table(tab), 2)
+mosaic(tab, pop = FALSE)
+labeling_cells(text = labs, margin = 0)(tab)
+## mosaic(tab, shade=T, legend=FALSE)
+d <- dev.off()
+
+## TODO
+## - redo plots with inhibition rather than viability
+## - cluster dendrogram with just patient name
+## - organize slides
+
 stop("stop")
 
 common.genes <- intersect(rownames(beat.mafs), rownames(fimm.genomic.bin))
@@ -771,34 +967,6 @@ fimm.expr.corr <- ddply(fimm.expr.df, c("DRUG_ID"), .parallel = TRUE,
                                 })
                         })
 
-plot.fimm.expr.vs.ic50 <- function(df, drug, ensg.gene, expr.mat, xlab, ylab) {
-  df.drug <- subset(df, DRUG_ID == drug)
-  resp <- data.frame(IC50 = df.drug$IC50, PATIENT_ID = df.drug$PATIENT_ID, id = df.drug$SCREEN_ID)
-  rownames(resp) <- resp$id
-  resp <- resp[!is.infinite(resp$IC50) & !is.nan(resp$IC50) & !is.na(resp$IC50),]
-  common.samples <- intersect(rownames(resp), colnames(expr.mat))
-  resp <- resp[common.samples,]
-  tmp <- as.data.frame(table(resp$PATIENT_ID))
-  colnames(tmp) <- c("PATIENT_ID", "weight")
-  tmp$weight <- 1/sqrt(tmp$weight)
-  resp <- merge(resp, tmp)
-  rownames(resp) <- resp$id
-  if(!(all(common.samples %in% rownames(resp)))) {
-    warning("UNEXPECTED row names")
-  }
-  if(!(ensg.gene %in% rownames(expr.mat))) {
-    warning(paste0("UNEXPECTED: ", ensg.gene, " not in expr.mat\n"))
-  }
-  if(!(all(common.samples %in% colnames(expr.mat)))) {
-    warning("UNEXPECTED columns not in expr.mat\n")
-  }
-  gene.expr <- fimm.expr.common[ensg.gene, common.samples]
-  df <- data.frame(expr = gene.expr, resp = resp$IC50, weights=resp$weight)
-  ggplot(df, aes(x = expr, y = resp, weight=weights)) + 
-    geom_point() + 
-    xlab(xlab) + ylab(ylab) +
-    stat_smooth(method = "lm", col = "red")  
-}
 
 
 ## Correlate gene target expression with target IC50 for OHSU
@@ -880,40 +1048,6 @@ plot.ohsu.expr.vs.ic50 <- function(df, drug, ensg.gene, expr.mat, xlab, ylab) {
     stat_smooth(method = "lm", col = "red")  
 }
 
-ohsu.fimm.expr.corr <- merge(ohsu.expr.corr, fimm.expr.corr, by.x = c("ID_Drug", "gene"), by.y = c("DRUG_ID", "gene"), suffixes = c(".ohsu", ".fimm"))
-
-subset(ohsu.fimm.expr.corr, (pval.ohsu < 0.05) & (pval.fimm < 0.05))
-## ID_Drug            gene          pval.ohsu             r2.ohsu          pval.fimm           r2.fimm
-## 100 FIMM003783 ENSG00000094631 0.0419410434254526  0.0494985601145971 0.0330721048250537 0.228393094777627
-## 127 FIMM003794 ENSG00000122025 0.0140628306932017 0.00833458654791967 0.0449806673025468  0.24180451968676
-ohsu.fimm.expr.corr$pval.fimm <- as.numeric(ohsu.fimm.expr.corr$pval.fimm)
-ohsu.fimm.expr.corr$pval.ohsu <- as.numeric(ohsu.fimm.expr.corr$pval.ohsu)
-
-## Plot pvalue distributions of FIMM and OHSU
-pdf("ohsu-fimm-pval-dist.pdf")
-g1 <- ggplot(ohsu.fimm.expr.corr, aes(x=pval.fimm)) + geom_histogram() + xlab("FIMM p-value")
-g2 <- ggplot(ohsu.fimm.expr.corr, aes(x=pval.ohsu)) + geom_histogram() + xlab("OHSU p-value")
-grid.arrange(g1, g2)
-d <- dev.off()
-
-ohsu.fimm.expr.corr$drug.gene <- unlist(apply(ohsu.fimm.expr.corr[,c("ID_Drug", "gene")], 1, function(row) paste0(row[1], "-", row[2])))
-## Make Venn diagram of FIMM vs OHSU significant
-vennList = list("FIMM"=ohsu.fimm.expr.corr$drug.gene[ohsu.fimm.expr.corr$pval.fimm < 0.05], "OHSU"=ohsu.fimm.expr.corr$drug.gene[ohsu.fimm.expr.corr$pval.ohsu < 0.05])
-pdf("ohsu-fimm-sig-venn.pdf")
-venn(vennList)
-d <- dev.off()
-
-old.nrow <- nrow(ohsu.fimm.expr.corr)
-ohsu.fimm.expr.corr <- merge(ohsu.fimm.expr.corr, unique(fimm.ohsu.drug.annotations[,c("ID_Drug", "DRUG_NAME")]))
-if(old.nrow != nrow(ohsu.fimm.expr.corr)) {
-  warning("UNEXPECTED drug correlation results grew\n")
-}
-
-old.nrow <- nrow(ohsu.fimm.expr.corr)
-ohsu.fimm.expr.corr <- merge(ohsu.fimm.expr.corr, unique(sym.to.ensg), by.x = "gene", by.y = "ENSG")
-if(old.nrow != nrow(ohsu.fimm.expr.corr)) {
-  warning("UNEXPECTED drug correlation results grew\n")
-}
 
 ## Plot few cases that have significant correlation in both
 both.sig <- subset(ohsu.fimm.expr.corr, (pval.ohsu < 0.05) & (pval.fimm < 0.05))

@@ -234,6 +234,7 @@ suppressPackageStartupMessages(library("scales")) ## for scientific
 
 Sys.setenv(R_ZIPCMD= "/usr/bin/zip")  
 
+suppressPackageStartupMessages(library("parallel"))
 num.cores <- detectCores()
 if(!is.na(num.cores) && (num.cores > 1)) {
   suppressPackageStartupMessages(library("doMC"))
@@ -1441,20 +1442,22 @@ common.fimm.cols <- c("SCREEN_ID", "DRUG_ID", "min.conc", "max.conc")
 fimm.dss.t0 <- merge(ll4.fimm.dss, l4.fimm.dss, by = common.fimm.cols, suffixes = c(".ll4", ".l4"), all = TRUE)
 fimm.dss.t10 <- merge(ll4.fimm.dss.t10, l4.fimm.dss.t10, by = common.fimm.cols, suffixes = c(".ll4", ".l4"), all = TRUE)
 
-## Store the fits, etc in synapse
+## Store the fits, etc in synapse and link them to this script in github
 
 ## Store the FIMM fits in FIMM Data/Processed Data (syn8270577)
 parentId <- "syn8270577"
+executed.url <- "https://github.com/bswhite/fimm-ohsu-aml/blob/master/061317/fit-ohsu-and-fimm-drug-response-data.R"
 
 path <- "fimm.dss.t0.tsv"
 write.table(file=path, fimm.dss.t0, row.names=FALSE, col.names=TRUE, sep="\t", quote=FALSE)
 f <- File(path, parentId = parentId, synapseStore = TRUE)
-synStore(f)
+synStore(f, executed = list(list(url=executed.url)), forceVersion = FALSE)
 
 path <- "fimm.dss.t10.tsv"
 write.table(file=path, fimm.dss.t10, row.names=FALSE, col.names=TRUE, sep="\t", quote=FALSE)
 f <- File(path, parentId = parentId, synapseStore = TRUE)
-synStore(f)
+synStore(f, executed = list(list(url=executed.url)), forceVersion = FALSE)
+
 
 ## Store the OHSU fits and expression in BEAT AML Data/Processed Data (syn10083332)
 parentId <- "syn10083332"
@@ -1462,32 +1465,32 @@ parentId <- "syn10083332"
 path <- "ohsu.dss.t0.tsv"
 write.table(file=path, ohsu.dss.t0, row.names=FALSE, col.names=TRUE, sep="\t", quote=FALSE)
 f <- File(path, parentId = parentId, synapseStore = TRUE)
-synStore(f)
+synStore(f, executed = list(list(url=executed.url)), forceVersion = FALSE)
 
 path <- "ohsu.dss.t10.tsv"
 write.table(file=path, ohsu.dss.t10, row.names=FALSE, col.names=TRUE, sep="\t", quote=FALSE)
 f <- File(path, parentId = parentId, synapseStore = TRUE)
-synStore(f)
+synStore(f, executed = list(list(url=executed.url)), forceVersion = FALSE)
  
 path <- "ohsu.expr.tsv"
 write.table(file=path, ohsu.expr, row.names=TRUE, col.names=TRUE, sep="\t", quote=FALSE)
 f <- File(path, parentId = parentId, synapseStore = TRUE)
-synStore(f)
+synStore(f, executed = list(list(url=executed.url)), forceVersion = FALSE)
 
 ## Store the RNA- and DNA-seq sample tables to synapse (note that these are just XLS sheets)
 path <- "ohsu.dnaseq.sample.summary.tsv"
 write.table(file=path, dnaseq.sample.summary.tbl, row.names=FALSE, col.names=TRUE, sep="\t", quote=FALSE)
 f <- File(path, parentId = parentId, synapseStore = TRUE)
-synStore(f)
+synStore(f, executed = list(list(url=executed.url)), forceVersion = FALSE)
 
 path <- "ohsu.rnaseq.sample.summary.tsv"
 write.table(file=path, rnaseq.sample.summary.tbl, row.names=FALSE, col.names=TRUE, sep="\t", quote=FALSE)
 f <- File(path, parentId = parentId, synapseStore = TRUE)
-synStore(f)
+synStore(f, executed = list(list(url=executed.url)), forceVersion = FALSE)
 
 path <- "ohsu.fimm.drugs.tsv"
 write.table(file=path, ohsu.fimm.drugs, row.names=FALSE, col.names=TRUE, sep="\t", quote=FALSE)
 f <- File(path, parentId = parentId, synapseStore = TRUE)
-synStore(f)
+synStore(f, executed = list(list(url=executed.url)), forceVersion = FALSE)
 
 stop("stop")

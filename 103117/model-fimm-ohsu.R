@@ -433,6 +433,7 @@ if(ds %in% data.sets.to.analyze) {
 
 ## Create the table of number of samples (to use for downsampling) vs drug.
 ## To do so, look for the non-NA samples in common between expression and drug
+## This is only used if we do downsampling.
 num.samples.per.drug <- drug.name.tbl
 for(train.indx in 1:length(train.set.names)) {
    train.set <- train.set.names[[train.indx]]
@@ -515,27 +516,28 @@ test.response.cols <- rep("dss.auc.ll4", length(test.response.cols))
 ## num.iterations determines the number of down-sampling.
 ## with.replacement = FALSE indicates downsampling, whereas = TRUE indicates bootstrapping.
 ## NB: can return fits by setting return.fits = TRUE, but this will take a lot of memory (and disk space when doing a save.image)
-res.auc <- train.and.test.crossproduct.with.downsampling(gene.sets = gene.sets, drug.name.tbl = drug.name.tbl, train.set.names = train.set.names, train.dss.args = train.dss.args, 
-                                       train.expr.args = train.expr.args, train.genomic.args = train.genomic.args, train.clinical.args = train.clinical.args, 
-                                       train.common.drugs = train.common.drugs, train.drugs = train.drugs, train.drug.cols = train.drug.cols, train.patient.cols = train.patient.cols, 
-                                       train.response.cols = train.response.cols, test.set.names = test.set.names, test.dss.args = test.dss.args, test.expr.args = test.expr.args, 
-                                       test.genomic.args = test.genomic.args, test.clinical.args = test.clinical.args, test.common.drugs = test.common.drugs,
-                                       test.drug.cols = test.drug.cols, test.patient.cols = test.patient.cols, test.response.cols = test.response.cols, 
-                                       seed = 1234, use.rf = FALSE, use.svm = FALSE, use.mean = FALSE, num.processes = num.processes, 
-                                       num.train.samples.per.drug = num.train.samples.per.drug, num.test.samples.per.drug = num.test.samples.per.drug,
-                                       num.iterations = 100, with.replacement = FALSE, return.fits = FALSE) 
-
-## Alternately, can do modeling without downsampling
-## res.auc <- train.and.test.crossproduct(gene.sets = gene.sets, drug.name.tbl = drug.name.tbl, train.set.names = train.set.names, train.dss.args = train.dss.args, 
-##                                        train.expr.args = train.expr.args, train.genomic.args = train.genomic.args, train.clinical.args = train.clinical.args, 
-##                                        train.common.drugs = train.common.drugs, train.drugs = train.drugs, train.drug.cols = train.drug.cols, train.patient.cols = train.patient.cols, 
-##                                        train.response.cols = train.response.cols, test.set.names = test.set.names, test.dss.args = test.dss.args, test.expr.args = test.expr.args, 
-##                                        test.genomic.args = test.genomic.args, test.clinical.args = test.clinical.args, test.common.drugs = test.common.drugs,
-##                                        test.drug.cols = test.drug.cols, test.patient.cols = test.patient.cols, test.response.cols = test.response.cols, 
-##                                        seed = 1234, use.rf = FALSE, use.svm = FALSE, use.mean = FALSE, num.processes = num.processes, 
-##                                        num.train.samples.per.drug = num.train.samples.per.drug, num.test.samples.per.drug = num.test.samples.per.drug,
-##                                        num.iterations = 100, with.replacement = FALSE, return.fits = FALSE) 
-
+res.auc <- NULL
+do.downsampling <- FALSE
+if(do.downsampling) {
+  res.auc <- train.and.test.crossproduct.with.downsampling(gene.sets = gene.sets, drug.name.tbl = drug.name.tbl, train.set.names = train.set.names, train.dss.args = train.dss.args, 
+                                         train.expr.args = train.expr.args, train.genomic.args = train.genomic.args, train.clinical.args = train.clinical.args, 
+                                         train.common.drugs = train.common.drugs, train.drugs = train.drugs, train.drug.cols = train.drug.cols, train.patient.cols = train.patient.cols, 
+                                         train.response.cols = train.response.cols, test.set.names = test.set.names, test.dss.args = test.dss.args, test.expr.args = test.expr.args, 
+                                         test.genomic.args = test.genomic.args, test.clinical.args = test.clinical.args, test.common.drugs = test.common.drugs,
+                                         test.drug.cols = test.drug.cols, test.patient.cols = test.patient.cols, test.response.cols = test.response.cols, 
+                                         seed = 1234, use.rf = FALSE, use.svm = FALSE, use.mean = FALSE, num.processes = num.processes, 
+                                         num.train.samples.per.drug = num.train.samples.per.drug, num.test.samples.per.drug = num.test.samples.per.drug,
+                                         num.iterations = 100, with.replacement = FALSE, return.fits = FALSE) 
+} else { 
+  ## Alternately, can do modeling without downsampling
+  res.auc <- train.and.test.crossproduct(gene.sets = gene.sets, drug.name.tbl = drug.name.tbl, train.set.names = train.set.names, train.dss.args = train.dss.args, 
+                                         train.expr.args = train.expr.args, train.genomic.args = train.genomic.args, train.clinical.args = train.clinical.args, 
+                                         train.common.drugs = train.common.drugs, train.drugs = train.drugs, train.drug.cols = train.drug.cols, train.patient.cols = train.patient.cols, 
+                                         train.response.cols = train.response.cols, test.set.names = test.set.names, test.dss.args = test.dss.args, test.expr.args = test.expr.args, 
+                                         test.genomic.args = test.genomic.args, test.clinical.args = test.clinical.args, test.common.drugs = test.common.drugs,
+                                         test.drug.cols = test.drug.cols, test.patient.cols = test.patient.cols, test.response.cols = test.response.cols, 
+                                         seed = 1234, use.rf = FALSE, use.svm = FALSE, use.mean = FALSE, num.processes = num.processes)
+}
 ## save.image(".Rdata")
 cat("Done training and testing with AUC\n")
 
@@ -593,23 +595,26 @@ cat("Extracted results\n")
 save.image(".Rdata.focs")
 
 ## Create a table that summarizes downsamplings by taking the entry corresponding to the median correlation.
-vars <- colnames(tbl.full)
-vars <- vars[!(vars %in% c("val", "pval"))]
-tbl <- ddply(tbl.full, .variables = vars, 
-             .fun = function(df) {
-               if(all(is.na(df$val))) {
-                 vec <- c(NA, NA)
+if(do.downsampling) { 
+  vars <- colnames(tbl.full)
+  vars <- vars[!(vars %in% c("val", "pval"))]
+  tbl <- ddply(tbl.full, .variables = vars, 
+               .fun = function(df) {
+                 if(all(is.na(df$val) | is.na(df$pval))) {
+                   vec <- c(NA, NA)
+                   names(vec) <- c("val", "pval")
+                   return(vec)
+                 }
+                 df <- df[!is.na(df$val) & !is.na(df$pval),,drop=FALSE]
+                 df <- df[order(as.numeric(df$val), decreasing=FALSE),,drop=FALSE]
+                 indx <- max(1,floor(nrow(df)/2))
+                 vec <- c(df$val[indx], df$pval[indx])
                  names(vec) <- c("val", "pval")
-                 return(vec)
-               }
-               df <- df[!is.na(df$val),]
-               df <- df[order(as.numeric(df$val), decreasing=FALSE),]
-               indx <- floor(nrow(df)/2)
-               vec <- c(df$val[indx], df$pval[indx])
-               names(vec) <- c("val", "pval")
-               vec
-             })
-
+                 vec
+               })
+} else {
+  tbl <- tbl.full
+}
 cat("Summarized results\n")
 
 ## For each train-test combination create a vector of correlations (one for each drug) of predicted vs actual in corr.lists
@@ -650,91 +655,6 @@ for(test.set.name in unique(tbl$test.set)) {
     }
   }
 }
-
-plot.longitudinal.comparisons <- function(corr.lists, train.sets1, test.sets1, train.sets2, test.sets2, alternatives, titles,
-                                          model = "ridge", response = "AUC", metric = "spearman", gene.set = "gene", ylab = "cor") {
-  glist <- llply(1:length(train.sets1),
-                 .fun = function(i) {
-                          label1 <- paste0(train.sets1[i], "-", test.sets1[i])
-                          label2 <- paste0(train.sets2[i], "-", test.sets2[i])
-                          suffix1 <- paste0(make.names(label1))
-                          suffix2 <- paste0(make.names(label2))
-                          corr1 <- corr.lists[[test.sets1[i]]][[model]][[response]][[metric]][[gene.set]][[train.sets1[i]]]
-                          corr2 <- corr.lists[[test.sets2[i]]][[model]][[response]][[metric]][[gene.set]][[train.sets2[i]]]
-                          df1 <- data.frame(cor = unname(corr1), drug = names(corr1))
-                          df2 <- data.frame(cor = unname(corr2), drug = names(corr2))
-                          m <- merge(df1, df2, by = "drug", suffixes = c(paste0(".", suffix1), paste0(".", suffix2)))
-                          tst <- wilcox.test(x = m[, paste0("cor.", suffix1)], y = m[, paste0("cor.", suffix2)], alternative = alternatives[i])
-##                          tst <- t.test(x = m[, paste0("cor.", suffix1)], y = m[, paste0("cor.", suffix2)], alternative = alternatives[i])
-                          vec <- c(tst$p.value, tst$statistic)
-                          names(vec) <- c("pval", "stat")
-                          ##vec
-                          ## g <- ggplot(data = m, aes(x = paste0("cor.", suffix1), y = paste0("cor.", suffix2)))
-                          ## g <- g + geom_point()
-                          ## g <- g + geom_abline(intercept = 0, slope = 1, linetype="dashed")
-                          tmp <- m[, c("drug", paste0("cor.", suffix1), paste0("cor.", suffix2))]
-                          colnames(tmp) <- c("drug", suffix1, suffix2)
-                          tmp$group <- 1:nrow(tmp)
-                          gt <- gather_(data = tmp, "data.set", "cor", c(suffix1, suffix2))
-                          gt$data.set <- factor(gt$data.set, levels = c(suffix1, suffix2))
-                          gt$cor <- as.numeric(gt$cor)
-                          g <- ggplot(data = gt, aes(x = data.set, y = cor, group = group))
-                          g <- g + geom_line()
-                          g <- g + ggtitle(paste0(titles[i], ": pval = ", format(tst$p.value, digits=2)))
-                          g <- g + ylab(ylab)
-                          g
-                 })
-  glist
-}
-
-## Make plots showing how the correlation (between predicted and actual drug response) changes
-## between pairs of training/test combinations.  e.g., compare how a specific drug correlation
-## changes between (1) training in CTRP and testing in Sanger (CTRP-Sanger) and (2) training in CTRP and testing in FIMM (CTRP-FIMM).
-## The loop below will compare the in vitro setting (CTRP-Sanger) to "mixed settings" (e.g., training in ex vivo data and
-## tested in in vitro data or vice versa; i.e., CTRP-OHSU, OHSU-Sanger) and to an idealized "upper bound" case
-## (OHSU-train vs OHSU-test, which does not suffer from heterogeneity across training and test data sets).
-## Do the same for the ex vivo setting (OHSU-FIMM).  
-for(model in unique(names(corr.lists[[1]]))) {
-  for(response in unique(names(corr.lists[[1]][[model]]))) {
-    for(metric in unique(names(corr.lists[[1]][[model]][[response]]))) {
-      for(gene.set in unique(names(corr.lists[[1]][[model]][[response]][[metric]]))) {
-        ## Make "longitudinal" comparisons from one train/test combo to another
-        train.sets1 <- c("ctrp", "ctrp", "ctrp", "ctrp")
-        test.sets1 <- c("sanger", "sanger", "sanger", "sanger")
-        train.sets2 <- c("ctrp", "ctrp", "ohsu.train", "ohsu.train")
-        test.sets2 <- c("fimm", "ohsu.test", "sanger", "ohsu.test")
-        alternatives <- c("greater", "greater", "greater", "less")
-        titles <- c("Mixed", "Mixed", "Mixed", "Upper Bound")
-
-        ylab <- switch(metric,
-                       "pearson" = { "Pearson's Correlation" },
-                       "spearman" = { "Spearman's Correlation" },
-                       { stop(paste0("Unknown metric ", metric, "\n")) })
-        glist <- plot.longitudinal.comparisons(corr.lists, train.sets1, test.sets1, train.sets2, test.sets2, alternatives = alternatives, titles = titles,
-                                               model = model, response = response, metric = metric, gene.set = gene.set, ylab = ylab)
-        pdf(paste0("in-vitro-comparisons-", paste(model, response, metric, gene.set, sep="-"), ".pdf"))
-        do.call("grid.arrange", c(glist, "top" = "In vitro (CTRP-Sanger) comparisons"))
-        d <- dev.off()
-
-        train.sets1 <- c("ohsu.train", "ohsu.train", "ohsu.train", "ohsu.train")
-        test.sets1 <- c("fimm", "fimm", "fimm", "fimm")
-        train.sets2 <- c("ctrp", "ctrp", "ohsu.train", "ohsu.train")
-        test.sets2 <- c("fimm", "ohsu.test", "sanger", "ohsu.test")
-        alternatives <- c("greater", "greater", "greater", "less")
-        titles <- c("Mixed", "Mixed", "Mixed", "Upper Bound")
-
-        glist <- plot.longitudinal.comparisons(corr.lists, train.sets1, test.sets1, train.sets2, test.sets2, alternatives = alternatives, titles = titles,
-                                               model = model, response = response, metric = metric, gene.set = gene.set, ylab = ylab)
-        pdf(paste0("ex-vivo-comparisons-", paste(model, response, metric, gene.set, sep="-"), ".pdf"))
-        do.call("grid.arrange", c(glist, "top" = "Ex vivo (OHSU-FIMM) comparisons"))
-        d <- dev.off()
-      }
-    }
-  }
-}
-
-cat("Created correlation list\n")
-save.image(".Rdata.focs")
 
 ## Make violin plots of correlations (model prediction of drug response vs actual drug response) faceted by
 ## training/test data set and type of feature (gene, biocart, hallmark, kegg, and reactome).

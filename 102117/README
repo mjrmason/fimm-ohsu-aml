@@ -1,0 +1,4 @@
+## Order of running scripts
+## ...
+## nohup Rscript ./calculate-dss-fimm-ohsu-ctrp-aml-sanger-aml.R >& calculate-dss-fimm-ohsu-ctrp-aml-sanger-aml.out &
+## nohup Rscript ./model-fimm-ohsu-ctrp-aml-sanger-aml.R >& model-fimm-ohsu-ctrp-aml-sanger-aml.out &

@@ -1,0 +1,572 @@
+## Set the download and output directory
+download.path <- "../input/"
+if (!file.exists(download.path)) {
+  dir.create(download.path)
+}
+
+output.path <- "output/"
+if (!file.exists(output.path)) {
+  dir.create(output.path)
+}
+
+beat.aml.cache <- "../input/beat-aml-files/"
+
+library(glmnet)
+suppressPackageStartupMessages(library("randomForest"))
+suppressPackageStartupMessages(library("e1071"))
+suppressPackageStartupMessages(library("foreach"))
+suppressPackageStartupMessages(library("parallel"))
+suppressPackageStartupMessages(library(openxlsx))
+suppressPackageStartupMessages(library(tidyr))
+
+suppressPackageStartupMessages(library("minpack.lm"))
+suppressPackageStartupMessages(library("ggplot2"))
+suppressPackageStartupMessages(library("gridExtra"))
+suppressPackageStartupMessages(library("caTools"))
+suppressPackageStartupMessages(library("data.table"))
+suppressPackageStartupMessages(library("pcaMethods"))
+## suppressPackageStartupMessages(library("GGally"))
+suppressPackageStartupMessages(library("VennDiagram"))
+suppressPackageStartupMessages(library(ReporteRs))
+suppressPackageStartupMessages(library(rJava))
+
+library(ggbeeswarm)
+library(plyr)
+library(stringr)
+library(synapseClient)
+
+num.cores <- detectCores()
+if(!is.na(num.cores) && (num.cores > 1)) {
+  suppressPackageStartupMessages(library("doMC"))
+  cat(paste("Registering ", num.cores-1, " cores.\n", sep=""))
+  registerDoMC(cores=(num.cores-1))
+}
+
+
+
+
+synapseLogin()
+
+## Set the java heap to 8GB
+##options(java.parameters = "-Xmx8000m")
+
+## Define a java garbage collection function
+jgc <- function()
+{
+  gc()
+  .jcall("java/lang/System", method = "gc")
+} 
+
+cat("Compare de novo vs in intro analyses\n")
+cat("i.e., compare the robustness of two fits:\n")
+cat("(1) fit to OHSU and validate against FIMM\n")
+cat("(1) fit to CTRP and validate against FIMM\n")
+
+## parentId is the OHSU processed data folder
+parentId <- "syn10083332"
+tbl <- synQuery(paste0("SELECT name,id FROM file WHERE parentId==\'", parentId, "\'"))
+
+## Read in the t=0 thresholded DSS values
+file.name <- "ohsu.foc.common.drugs.dss.t0.tsv"
+synId <- tbl[tbl$file.name == file.name, "file.id"]
+obj <- synGet(synId, downloadFile = TRUE)
+file <- getFileLocation(obj)
+ohsu.dss.orig <- as.data.frame(fread(file))
+
+## parentId is the FIMM processed data folder
+parentId <- "syn8270577"
+tbl <- synQuery(paste0("SELECT name,id FROM file WHERE parentId==\'", parentId, "\'"))
+
+## Read in the t=0 thresholded DSS values
+file.name <- "fimm.foc.common.drugs.dss.t0.tsv"
+synId <- tbl[tbl$file.name == file.name, "file.id"]
+obj <- synGet(synId, downloadFile = TRUE)
+file <- getFileLocation(obj)
+fimm.dss.orig <- as.data.frame(fread(file))
+
+## parentId is the CTRP processed data folder
+parentId <- "syn10288724"
+tbl <- synQuery(paste0("SELECT name,id FROM file WHERE parentId==\'", parentId, "\'"))
+
+## Read in the t=0 thresholded DSS values
+file.name <- "ctrp.foc.common.drugs.dss.t0.tsv"
+synId <- tbl[tbl$file.name == file.name, "file.id"]
+obj <- synGet(synId, downloadFile = TRUE)
+file <- getFileLocation(obj)
+ctrp.dss.orig <- as.data.frame(fread(file))
+
+
+## Read in the expression matrices
+## Read in the OHSU expression data
+## path <- "ohsu.expr.tsv"
+synId <- "syn10083723"
+obj <- synGet(synId, downloadFile = TRUE)
+file <- getFileLocation(obj)
+ohsu.expr <- read.table(file, header=TRUE, sep="\t")
+## Convert the column names from X20.00347 to 20-00347
+colnames(ohsu.expr) <- gsub("X(.*)\\.(.*)", "\\1-\\2", colnames(ohsu.expr))
+
+## Read in the OHSU genomic data
+## NB: a 1 indicates that the gene had a non-synonymous or splice site mutation.
+## path <- "ohsu.genomic.ns.ss.tsv"
+## Columns correspond to samples.
+synId <- "syn10220117"
+obj <- synGet(id=synId, downloadFile = TRUE)
+file <- getFileLocation(obj)
+ohsu.genomic <- read.table(file, header=TRUE, sep="\t")
+colnames(ohsu.genomic) <- gsub("X(.*)\\.(.*)", "\\1-\\2", colnames(ohsu.genomic))
+
+## Read in the OHSU diagnosis info in the raw drug file and drug outcome file
+## and limit samples to aml
+aml.diagnosis <- "ACUTE MYELOID LEUKAEMIA (AML) AND RELATED PRECURSOR NEOPLASMS"
+
+## Read in the OHSU patient diagnosis table (corresponding to the drug response data).
+## Diagnosis_Labs_Treatments_Outcomes_2017_01_12.xlsx (syn8149174)
+synId <- "syn8149174"
+obj <- synGet(synId, downloadFile=TRUE)
+ohsu.diagnosis.tbl <- openxlsx:::read.xlsx(getFileLocation(obj), sheet=1)
+ohsu.diagnosis.tbl <- subset(ohsu.diagnosis.tbl, most_recent_diagnosis == aml.diagnosis)
+ohsu.diagnosis.tbl <- subset(ohsu.diagnosis.tbl, diagnosis_at_time_of_specimen_acquisition == aml.diagnosis)
+
+## Read in the raw OHSU inhibitor data 
+## inhibitor_data_points_2017_01_12.txt
+## This latest file seems to have data from the prior releases
+synId <- "syn8149180"
+inh.obj <- synGet(synId, downloadFile=TRUE)
+ohsu.inh.tbl <- fread(getFileLocation(inh.obj))
+ohsu.inh.tbl <- as.data.frame(ohsu.inh.tbl)
+ohsu.inh.tbl <- subset(ohsu.inh.tbl, diagnosis == aml.diagnosis)
+ohsu.inh.tbl <- unique(ohsu.inh.tbl[, c("patient_id", "lab_id", "inhibitor", "diagnosis")])
+
+## Limit the drugs to those that come from aml samples
+ohsu.dss.orig <- subset(ohsu.dss.orig, lab_id %in% ohsu.diagnosis.tbl$lab_id)
+ohsu.dss.orig <- subset(ohsu.dss.orig, lab_id %in% ohsu.inh.tbl$lab_id)
+
+
+## Read in the FIMM expression data (RNASeq.CPM.log2.bc.csv)
+## Load (batch corrected) FIMM expression data
+obj <- synGet(id="syn8270602", downloadFile = TRUE)
+file <- getFileLocation(obj)
+fimm.expr <- read.table(file, header=TRUE, sep=",")
+## Make the columns samples
+fimm.expr <- t(fimm.expr)
+
+## Read in the FIMM genomic data
+## The "bin" file simply is 0/1 matrix indicating whether the sample (row) has a mutation
+## in the gene (column).  These use gene symbols.
+## NB: a 1 indicates that the gene had a non-synonymous or splice site mutation.
+## path <- "fimm.genomic.ns.ss.tsv"
+## Columns correspond to genes.
+synId <- "syn10220160"
+obj <- synGet(id=synId, downloadFile = TRUE)
+file <- getFileLocation(obj)
+fimm.genomic <- read.table(file, header=TRUE, sep="\t")
+## Make the columns samples
+fimm.genomic <- t(fimm.genomic)
+
+## Read in the FIMM Metadata and ensure that we only analyze AML data
+synId <- "syn8270594"
+obj <- synGet(id=synId, downloadFile = TRUE)
+file <- getFileLocation(obj)
+fimm.metadata <- read.table(file, header=TRUE, sep=",")
+fimm.metadata <- subset(fimm.metadata, grepl(diagnosis, pattern="AML"))
+
+fimm.genomic <- fimm.genomic[, colnames(fimm.genomic) %in% rownames(fimm.metadata)]
+fimm.expr <- fimm.expr[, colnames(fimm.expr) %in% rownames(fimm.metadata)]
+
+## Read in the CTRP expression data
+synId <- "syn5616092"
+obj <- synGet(synId, downloadFile = TRUE)
+file <- getFileLocation(obj)
+ctrp.expr <- read.table(file, header=TRUE, sep=",")
+rownames(ctrp.expr) <- ctrp.expr[,1]
+ctrp.expr <- ctrp.expr[,-1]
+
+## Read in the CTRP cell line metadata so we can limit (or not) cell lines by disease type
+## CTRP cell line metadata: "v20.meta.per_cell_line.txt" (syn5632192)
+synId <- "syn5632192"
+obj <- synGet(synId, downloadFile = TRUE)
+ctrp.cell.line.metadata <- read.table(getFileLocation(obj), sep="\t", header=TRUE, as.is=TRUE, comment.char="", quote="")
+
+## Samples in CTRP do not have "."s and are all in caps
+colnames(ctrp.expr) <- gsub(x=colnames(ctrp.expr), pattern="\\.", replacement="")
+colnames(ctrp.expr) <- toupper(colnames(ctrp.expr))
+ctrp.dss.orig <- merge(ctrp.dss.orig, ctrp.cell.line.metadata[, c("master_ccl_id", "ccl_name")])
+## all.ccls <- intersect(colnames(ctrp.expr), ctrp.dss.orig$ccl_name)
+all.ccls <- unique(ctrp.dss.orig$ccl_name)
+heme.ccls <- all.ccls[all.ccls %in% ctrp.cell.line.metadata[ctrp.cell.line.metadata$ccle_primary_hist == "haematopoietic_neoplasm", "ccl_name"]]
+aml.ccls <- all.ccls[all.ccls %in% ctrp.cell.line.metadata[ctrp.cell.line.metadata$ccle_hist_subtype_1 == "acute_myeloid_leukaemia", "ccl_name"]]
+
+## Subset to analysis to drugs common to FIMM, OHSU, and CTRP
+common.drugs <- ohsu.dss.orig[, c("inhibitor", "FIMM_Batch_ID_Drug.ll4", "FIMM_DRUG_NAME.ll4", "Mechanism.Targets.ll4", "master_cpd_id.ll4")]
+colnames(common.drugs) <- c("ohsu.inhibitor", "fimm.DRUG_ID", "DRUG_NAME", "Mechanism", "master_cpd_id")
+common.drugs <- subset(common.drugs, fimm.DRUG_ID %in% fimm.dss.orig$DRUG_ID)
+common.drugs <- subset(common.drugs, master_cpd_id %in% ctrp.dss.orig$master_cpd_id)
+
+un <- unique(common.drugs)
+fimm.common.drugs <- un$fimm.DRUG_ID
+ohsu.common.drugs <- un$ohsu.inhibitor
+ctrp.common.drugs <- un$master_cpd_id
+
+## Further restrict to MEK inhibitors
+## common.drugs <- subset(un, grepl(Mechanism, pattern="MEK"))
+## cat(paste0("Testing the following drugs: ", paste(unique(common.drugs$ohsu.inhibitor), collapse=", "), "\n"))
+
+## Actually, just limit to a _single_ MEK inhibitor
+## common.drugs <- common.drugs[1,,drop=F]
+
+## fimm.mek.drugs <- common.drugs$fimm.DRUG_ID
+## ohsu.mek.drugs <- common.drugs$ohsu.inhibitor
+
+fimm.drugs <- un$fimm.DRUG_ID
+ohsu.drugs <- un$ohsu.inhibitor
+ctrp.drugs <- un$master_cpd_id
+
+ohsu.query.drugs <- ohsu.common.drugs
+fimm.query.drugs <- fimm.common.drugs
+ctrp.query.drugs <- ctrp.common.drugs
+
+source("../common/data-preprocessing.R")
+source("models.R")
+
+## Model using DSS2 values from L.4 (logistic, not log logistic) fit.
+## ret <- model.fimm.and.ohsu(ohsu.dss.orig, ohsu.expr, ohsu.drugs, fimm.dss.orig, fimm.expr, fimm.drugs, response.col = "dss2.l4")
+
+rets <- list()
+
+## Add the SeqID to the OHSU drug data.
+## Read in the rna-seq summary table, which provides a map from the lab_id's used
+## in the drug response data to the SeqID's used in the expression data.
+synId <- "syn10083817"
+obj <- synGet(synId, downloadFile = TRUE)
+file <- getFileLocation(obj)
+ohsu.rnaseq.sample.summary <- read.table(file, header=TRUE, sep="\t")
+
+ohsu.dss.orig <- merge(ohsu.dss.orig, ohsu.rnaseq.sample.summary, by.x = "lab_id", by.y = "Original_LabID")
+
+all.expr.cols <- intersect(colnames(ctrp.expr), all.ccls)
+heme.expr.cols <- intersect(colnames(ctrp.expr), heme.ccls)
+aml.expr.cols <- intersect(colnames(ctrp.expr), aml.ccls)
+
+stop("stop")
+
+min.expr <- min(ctrp.expr[ctrp.expr != 0])
+ctrp.log2.expr <- ctrp.expr
+ctrp.log2.expr[ctrp.log2.expr == 0] <- min.expr
+ctrp.log2.expr <- log2(ctrp.log2.expr)
+
+test.response.col <- "auc"
+test.response.col <- "area_under_curve"
+ctrp.response.col <- "auc"
+ctrp.response.col <- "area_under_curve"
+ret <- model.train.and.test(train.dss.arg = ohsu.dss.orig, train.expr.arg = ohsu.expr, train.genomic.arg = NULL, train.clinical.arg = NULL, 
+                            train.common.drugs = ohsu.common.drugs, train.drugs = ohsu.query.drugs, train.drug.col = "inhibitor", 
+                            train.patient.col = "SeqID", train.response.col = "auc.ll4", 
+                            test.dss.arg = ctrp.dss.orig, test.expr.arg = ctrp.log2.expr, test.genomic.arg = NULL, test.clinical.arg = NULL, 
+                            test.common.drugs = ctrp.common.drugs, test.drugs = ctrp.query.drugs, test.drug.col = "master_cpd_id", 
+                            test.patient.col = "ccl_name", test.response.col = test.response.col, seed = 1234) 
+rets[["ohsu.vs.ctrp.all"]] <- ret
+
+ret <- model.train.and.test(train.dss.arg = ohsu.dss.orig, train.expr.arg = ohsu.expr, train.genomic.arg = NULL, train.clinical.arg = NULL, 
+                            train.common.drugs = ohsu.common.drugs, train.drugs = ohsu.query.drugs, train.drug.col = "inhibitor", 
+                            train.patient.col = "SeqID", train.response.col = "auc.ll4", 
+                            test.dss.arg = ctrp.dss.orig, test.expr.arg = ctrp.log2.expr[, heme.expr.cols], test.genomic.arg = NULL, test.clinical.arg = NULL, 
+                            test.common.drugs = ctrp.common.drugs, test.drugs = ctrp.query.drugs, test.drug.col = "master_cpd_id", 
+                            test.patient.col = "ccl_name", test.response.col = test.response.col, seed = 1234) 
+rets[["ohsu.vs.ctrp.heme"]] <- ret
+
+ret <- model.train.and.test(train.dss.arg = ohsu.dss.orig, train.expr.arg = ohsu.expr, train.genomic.arg = NULL, train.clinical.arg = NULL, 
+                            train.common.drugs = ohsu.common.drugs, train.drugs = ohsu.query.drugs, train.drug.col = "inhibitor", 
+                            train.patient.col = "SeqID", train.response.col = "auc.ll4", 
+                            test.dss.arg = ctrp.dss.orig, test.expr.arg = ctrp.log2.expr[, aml.expr.cols], test.genomic.arg = NULL, test.clinical.arg = NULL, 
+                            test.common.drugs = ctrp.common.drugs, test.drugs = ctrp.query.drugs, test.drug.col = "master_cpd_id", 
+                            test.patient.col = "ccl_name", test.response.col = test.response.col, seed = 1234) 
+rets[["ohsu.vs.ctrp.aml"]] <- ret
+
+ret <- model.train.and.test(train.dss.arg = ohsu.dss.orig, train.expr.arg = ohsu.expr, train.genomic.arg = NULL, train.clinical.arg = NULL, 
+                            train.common.drugs = ohsu.common.drugs, train.drugs = ohsu.query.drugs, train.drug.col = "inhibitor", 
+                            train.patient.col = "SeqID", train.response.col = "auc.ll4", 
+                            test.dss.arg = fimm.dss.orig, test.expr.arg = fimm.expr, test.genomic.arg = NULL, test.clinical.arg = NULL, 
+                            test.common.drugs = fimm.common.drugs, test.drugs = fimm.query.drugs, test.drug.col = "DRUG_ID", 
+                            test.patient.col = "SCREEN_ID", test.response.col = "auc.ll4", seed = 1234) 
+rets[["ohsu.vs.fimm"]] <- ret
+
+response.col <- "dss2.l4"
+
+## Train and test on CTRP
+iqrs <- unlist(apply(ctrp.log2.expr, 1, IQR))
+ctrp.log2.expr.filt <- ctrp.log2.expr[iqrs > median(iqrs[iqrs > 0]),]
+
+iqrs <- unlist(apply(ohsu.expr, 1, IQR))
+ohsu.expr.filt <- ohsu.expr[iqrs > median(iqrs[iqrs > 0]),]
+
+iqrs <- unlist(apply(fimm.expr, 1, IQR))
+fimm.expr.filt <- fimm.expr[iqrs > median(iqrs[iqrs > 0]),]
+
+common.genes <- intersect(rownames(ctrp.log2.expr.filt), rownames(ohsu.expr.filt))
+common.genes <- intersect(common.genes, rownames(fimm.expr.filt))
+
+plot(density(unlist(na.omit(ohsu.expr.filt[common.genes, ]))))
+lines(density(unlist(na.omit(ctrp.log2.expr.filt[common.genes, ]))))
+lines(density(unlist(na.omit(fimm.expr.filt[common.genes, ]))))
+
+plot(density(na.omit(ohsu.dss.orig[, "auc.ll4"])))
+lines(density(na.omit(fimm.dss.orig[, "auc.ll4"])))
+lines(density(na.omit(ctrp.dss.orig[, ctrp.response.col])))
+
+ret <- model.train.and.test(train.dss.arg = ohsu.dss.orig, train.expr.arg = ohsu.expr[common.genes, ], train.genomic.arg = NULL, train.clinical.arg = NULL, 
+                            train.common.drugs = ohsu.common.drugs, train.drugs = ohsu.query.drugs, train.drug.col = "inhibitor", 
+                            train.patient.col = "SeqID", train.response.col = "auc.ll4", 
+                            test.dss.arg = fimm.dss.orig, test.expr.arg = fimm.expr[common.genes, ], test.genomic.arg = NULL, test.clinical.arg = NULL, 
+                            test.common.drugs = fimm.common.drugs, test.drugs = fimm.query.drugs, test.drug.col = "DRUG_ID", 
+                            test.patient.col = "SCREEN_ID", test.response.col = "auc.ll4", seed = 1234) 
+t2 <- extract.results(ret)
+t2
+
+ret <- model.train.and.test(train.dss.arg = ohsu.dss.orig, train.expr.arg = ohsu.expr[common.genes, ], train.genomic.arg = NULL, train.clinical.arg = NULL, 
+                            train.common.drugs = ohsu.common.drugs, train.drugs = ohsu.query.drugs, train.drug.col = "inhibitor", 
+                            train.patient.col = "SeqID", train.response.col = "auc.ll4", 
+                            test.dss.arg = ctrp.dss.orig, test.expr.arg = ctrp.log2.expr[common.genes, aml.expr.cols], test.genomic.arg = NULL, test.clinical.arg = NULL, 
+                            test.common.drugs = ctrp.common.drugs, test.drugs = ctrp.query.drugs, test.drug.col = "master_cpd_id", 
+                            test.patient.col = "ccl_name", test.response.col = test.response.col, seed = 1234) 
+t2 <- extract.results(ret)
+t2
+
+
+cols <- heme.expr.cols
+cols <- all.expr.cols
+half <- floor(length(cols)/2)
+ctpr.train.samples <- cols[1:half]
+ctpr.test.samples <- cols[!(cols %in% ctpr.train.samples)]
+expr <- ctrp.log2.expr.filt
+expr <- ctrp.log2.expr
+ret <- model.train.and.test(train.dss.arg = ctrp.dss.orig, train.expr.arg = expr[, ctpr.train.samples], train.genomic.arg = NULL, train.clinical.arg = NULL, 
+                            train.common.drugs = ctrp.common.drugs, train.drugs = ctrp.query.drugs, train.drug.col = "master_cpd_id", 
+                            train.patient.col = "ccl_name", train.response.col = ctrp.response.col, 
+                            test.dss.arg = ctrp.dss.orig, test.expr.arg = expr[, ctpr.test.samples], test.genomic.arg = NULL, test.clinical.arg = NULL, 
+                            test.common.drugs = ctrp.common.drugs, test.drugs = ctrp.query.drugs, test.drug.col = "master_cpd_id", 
+                            test.patient.col = "ccl_name", test.response.col = ctrp.response.col, seed = 1234) 
+t2 <- extract.results(ret)
+t2
+
+## ohsu.query.drugs <- ohsu.mek.drugs
+## fimm.query.drugs <- fimm.mek.drugs
+
+rets <- list()
+responses <- c("dss2.l4", "auc.l4", "ic50.l4")
+## responses <- c("dss2.l4")
+data.types <- c("dna", "both", "rna")
+## data.types <- c("dna")
+for(response.col in responses) {
+  rets[[response.col]] <- list()
+
+  for(data.type in data.types) {
+    ohsu.expr.arg <- NULL
+    fimm.expr.arg <- NULL
+    ohsu.genomic.arg <- NULL
+    fimm.genomic.arg <- NULL
+
+    if(data.type %in% c("rna", "both")) {
+      ohsu.expr.arg <- ohsu.expr
+      fimm.expr.arg <- fimm.expr
+    }
+    if(data.type %in% c("dna", "both")) {
+      ohsu.genomic.arg <- ohsu.genomic
+      fimm.genomic.arg <- fimm.genomic
+    }
+    cat(paste0("Fitting ", response.col, " using data ", data.type, "\n"))
+    rets[[response.col]][[data.type]] <- model.fimm.and.ohsu(ohsu.dss.arg, ohsu.expr.arg, ohsu.genomic.arg, ohsu.common.drugs, ohsu.query.drugs, fimm.dss.arg, fimm.expr.arg, fimm.genomic.arg, fimm.common.drugs, fimm.query.drugs, response.col)
+    gc()
+    save.image(".Rdata")
+  }
+}
+
+## response.col <- "dss2.l4"
+## ret.dss2 <- model.fimm.and.ohsu(ohsu.dss.arg, ohsu.expr.arg, ohsu.common.drugs, ohsu.query.drugs, fimm.dss.arg, fimm.expr.arg, fimm.common.drugs, fimm.query.drugs, response.col)
+
+## mek drugs
+## PD184352
+## Selumetinib
+## Trametinib (this one is missing because the FIMM drug FIMM003751 has 2 drug sets, one of which only has a single concentration point)
+##    PATIENT_ID                  SCREEN_ID  DRUG_SET    DRUG_ID min.conc.nM
+##708  FHRB_1867 FHRB_1867_26102012_1030_BM  Fimm-01A FIMM003751        2.50
+##760  FHRB_1867 FHRB_1867_26102012_1030_BM FO2AB1-aq FIMM003751        0.03
+##    max.conc.nM
+##708         2.5
+##760       250.0
+
+##    PATIENT_ID                  SCREEN_ID  DRUG_SET    DRUG_ID min.conc.nM
+##586  FHRB_1690 FHRB_1690_12092012_1100_BM  Fimm-01A FIMM003751        2.50
+##638  FHRB_1690 FHRB_1690_12092012_1100_BM FO2AB1-aq FIMM003751        0.03
+##    max.conc.nM
+##586         2.5
+##638       250.0
+
+cat("Finished modeling\n")
+
+mydoc <- pptx()
+
+doc.title <- paste0('Fit to OHSU; test on FIMM:\nIC50, AUC, and DSS (t = ', 0, ')')  
+doc.file <- paste0("071817-fit-ohsu-test-fimm-t-", 0, ".pptx")
+mydoc <- addSlide( mydoc, slide.layout = 'Title Slide' )
+mydoc <- addTitle( mydoc, doc.title )
+mydoc <- addSubtitle( mydoc , 'July 18, 2017')
+
+tbls <- list()
+for(response.col in names(rets)) {
+  tbls[[response.col]] <- list()
+  for(data.type in names(rets[[response.col]])) {
+  tbls[[response.col]][[data.type]] <-
+     ldply(rets[[response.col]][[data.type]], 
+             .fun = function(foo) {
+                ldply(foo,
+             .fun = function(df) {
+                ret <- NULL
+                if(!is.na(df$predicted)) {
+                  ct <- cor.test(df$predicted, df$actual)
+                  ret <- data.frame(cor = ct$estimate, pval = ct$p.value, ohsu.drug = df$ohsu.drug, fimm.drug = df$fimm.drug, alpha = df$alpha, s = df$s, model = df$model)
+                } else {
+                  ret <- data.frame(cor = NA, pval = NA, ohsu.drug = df$ohsu.drug, fimm.drug = df$fimm.drug, alpha = df$alpha, s = df$s, model = df$model)
+                }
+                ret
+             }) })
+  metric <- response.col
+  metric <- gsub(metric, pattern=".l4", replacement="")
+  metric <- toupper(metric)
+
+  tbl <- tbls[[response.col]][[data.type]]
+  t2 <- subset(tbl, is.na(s) | (s == "lambda.min"))
+  t2$model <- as.character(t2$model)
+  t2[(t2$model == "glmnet") & (t2$alpha == 0),"model"] <- "ridge"
+  t2[(t2$model == "glmnet") & (t2$alpha == 1),"model"] <- "lasso"
+  t2 <- subset(t2, model != "glmnet")
+
+  g <- plot.correlation.vs.drug(t2)
+  g <- g + ggtitle(paste0(metric, " ", data.type))
+  pdf(paste0(metric, "-", data.type, "-correlation-vs-drug.pdf"))
+  print(g)
+  d <- dev.off()
+
+  mydoc <- addSlide( mydoc, slide.layout = "Title and Content" )
+  title <- paste0(metric, " ", data.type, ": Correlation vs Drug")
+  mydoc <- addTitle( mydoc, title )
+  mydoc <- addPlot( doc = mydoc, fun = print, x = g)
+
+  g <- plot.correlation.vs.model(t2)
+  g <- g + ggtitle(paste0(metric, " ", data.type))
+  pdf(paste0(metric, "-", data.type, "-correlation-vs-model.pdf"))
+  print(g)
+  d <- dev.off()
+
+  mydoc <- addSlide( mydoc, slide.layout = "Title and Content" )
+  title <- paste0(metric, " ", data.type, ": Correlation vs Model")
+  mydoc <- addTitle( mydoc, title )
+  mydoc <- addPlot( doc = mydoc, fun = print, x = g)
+}
+}
+
+writeDoc(mydoc, doc.file)
+
+cat("Finished successfully\n")
+
+gc()
+save.image(".Rdata")
+
+cat("Finished writing .Rdata successfully\n")
+
+## Only keep ridge, lasso, svm, and rf from table and rename with caps
+sanitize.table <- function(tbl) {
+  tbl.tmp <- subset(tbl, is.na(s) | (s == "lambda.min"))
+  tbl.tmp$model <- as.character(tbl.tmp$model)
+  tbl.tmp[(tbl.tmp$model == "glmnet") & (tbl.tmp$alpha == 0),"model"] <- "Ridge"
+  tbl.tmp[(tbl.tmp$model == "glmnet") & (tbl.tmp$alpha == 1),"model"] <- "LASSO"
+  tbl.tmp <- subset(tbl.tmp, model != "glmnet")
+  tbl.tmp[(tbl.tmp$model == "rf"),"model"] <- "RF"
+  tbl.tmp[(tbl.tmp$model == "svm"),"model"] <- "SVM"
+  tbl.tmp$model <- factor(tbl.tmp$model, levels = c("LASSO", "Ridge", "RF", "SVM"))
+  colnames(tbl.tmp)[colnames(tbl.tmp) == "model"] <- "Model"
+  tbl.tmp$cor <- as.numeric(tbl.tmp$cor)
+  tbl.tmp$ohsu.drug <- factor(tbl.tmp$ohsu.drug)
+  tbl.tmp
+}
+
+## Plot IC50, DSS2, and AUC for Ridge RNA
+t1 <- tbls[["ic50.l4"]][["rna"]]
+t1$Metric <- "IC50"
+t2 <- tbls[["dss2.l4"]][["rna"]]
+t2$Metric <- "DSS2"
+t3 <- tbls[["auc.l4"]][["rna"]]
+t3$Metric <- "AUC"
+tbl <- rbind(t1, t2, t3)
+tbl <- sanitize.table(tbl)
+tbl <- subset(tbl, Model == "Ridge")
+tbl$Metric <- factor(tbl$Metric, levels = c("IC50", "AUC", "DSS2"))
+
+g <- ggplot(data = tbl, aes(x = Metric, y = cor, colour = Metric))
+g <- g + geom_violin()
+g <- g + geom_beeswarm()
+g <- g + xlab("Metric")
+g <- g + ylab("Correlation")
+g <- g + theme(axis.text.x=element_text(angle = 45, hjust = 1))
+tiff("rna-ridge-vs-metric.tiff")
+print(g)
+d <- dev.off()
+
+## Plot RNA, DNA, and both for Ridge DSS2
+t1 <- tbls[["dss2.l4"]][["rna"]]
+t1$Data <- "RNA"
+t2 <- tbls[["dss2.l4"]][["dna"]]
+t2$Data <- "DNA"
+t3 <- tbls[["dss2.l4"]][["both"]]
+t3$Data <- "Both"
+tbl <- rbind(t1, t2, t3)
+tbl <- sanitize.table(tbl)
+tbl <- subset(tbl, Model == "Ridge")
+tbl$Data <- factor(tbl$Data, levels = c("DNA", "RNA", "Both"))
+
+g <- ggplot(data = tbl, aes(x = Data, y = cor, colour = Data))
+g <- g + geom_violin()
+g <- g + geom_beeswarm()
+g <- g + xlab("Data")
+g <- g + ylab("Correlation")
+g <- g + theme(axis.text.x=element_text(angle = 45, hjust = 1))
+tiff("dss2-ridge-vs-data.tiff")
+print(g)
+d <- dev.off()
+
+## Plot LASSO, RF, Ridge, and SVM for DSS2 RNA
+tbl <- tbls[["dss2.l4"]][["rna"]]
+tbl <- sanitize.table(tbl)
+
+g <- ggplot(data = tbl, aes(x = Model, y = cor, colour = Model))
+g <- g + geom_violin()
+g <- g + geom_beeswarm()
+g <- g + xlab("Model")
+g <- g + ylab("Correlation")
+g <- g + theme(axis.text.x=element_text(angle = 45, hjust = 1))
+tiff("dss2-rna-vs-model.tiff")
+print(g)
+d <- dev.off()
+
+## Plot DSS2 RNA LASSO, RF, Ridge, and SVM vs drugs
+tbl <- tbls[["dss2.l4"]][["rna"]]
+tbl <- sanitize.table(tbl)
+rftbl <- subset(tbl, Model == "RF")
+rftbl <- rftbl[order(rftbl$cor, decreasing=TRUE),]
+ordered.levels <- unique(rftbl$ohsu.drug)
+tbl$ohsu.drug <- factor(tbl$ohsu.drug, levels = ordered.levels)
+g <- ggplot(data = tbl, aes(x = ohsu.drug, y = cor, colour = Model, group = Model))
+g <- g + geom_point() + geom_line()
+g <- g + xlab("Drug")
+g <- g + ylab("Correlation")
+g <- g + theme(axis.text.x=element_text(angle = 45, hjust = 1, size = 6))
+tiff("dss2-rna-vs-drugs.tiff")
+print(g)
+d <- dev.off()
+
+save.image(".Rdata")
+
+cat("Finished plotting successfully\n")
+
+q(status=0)
+

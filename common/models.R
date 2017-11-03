@@ -531,7 +531,7 @@ test.model.with.downsampling_ <- function(fits, drug.name.tbl, train.drug.col, t
    ## fits is a list (of lists).  The ith entry is a list of fits for drug i.
    ## Each entry of _that_ list is a fit using a different method.
    ret <- llply(fits,
-                .parallel = FALSE,
+                .parallel = TRUE,
                 .fun = function(drug.fits) {
 
                          ret.list <- list()
@@ -758,7 +758,7 @@ train.model.with.downsampling_ <- function(train.expr, train.genomic, train.clin
    z.score.drc <- TRUE
    z.score <- TRUE
    ret <- llply(1:length(train.drugs),
-                .parallel = TRUE,
+                .parallel = FALSE,
                 .fun = function(drug.i) {
                          llply(1:num.iterations, 
                                .parallel = FALSE,

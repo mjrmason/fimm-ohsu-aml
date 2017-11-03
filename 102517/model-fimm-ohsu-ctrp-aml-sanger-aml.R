@@ -454,7 +454,7 @@ for(train.indx in 1:length(train.set.names)) {
    num.samples.per.drug[, col] <- NA
    for(i in 1:nrow(num.samples.per.drug)) {
      if(is.na(num.samples.per.drug[i, train.drug.cols[[train.indx]]])) { next }
-     vec <- drc[num.samples.per.drug[i, train.drug.cols[[train.indx]]],]
+     vec <- drc[as.character(num.samples.per.drug[i, train.drug.cols[[train.indx]]]),]
      flag <- !is.na(vec)
      drug.samples <- intersect(samples, names(vec)[flag])
      num.samples.per.drug[i, col] <- length(unique(drug.samples))
@@ -478,7 +478,7 @@ for(test.indx in 1:length(test.set.names)) {
    num.samples.per.drug[, col] <- NA
    for(i in 1:nrow(num.samples.per.drug)) {
      if(is.na(num.samples.per.drug[i, test.drug.cols[[test.indx]]])) { next }
-     vec <- drc[num.samples.per.drug[i, test.drug.cols[[test.indx]]],]
+     vec <- drc[as.character(num.samples.per.drug[i, test.drug.cols[[test.indx]]]),]
      flag <- !is.na(vec)
      drug.samples <- intersect(samples, names(vec)[flag])
      num.samples.per.drug[i, col] <- length(unique(drug.samples))

@@ -158,6 +158,7 @@ source("../common/dss.R")
 source("../common/drc-fit.R")
 
 drug.screen.cols <- c("experiment_id", "master_cpd_id", "master_ccl_id")
+stop("Need to redo this to account for replicates--by including assay_plate_barcode above.  This change will need to be made elsewhere as well\n")
 conc.col <- "conc.nM"
 response.col <- "percent_viability"
 all.cols <- c(drug.screen.cols, conc.col, response.col)

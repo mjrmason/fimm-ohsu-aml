@@ -1,6 +1,465 @@
 suppressPackageStartupMessages(library("hdi"))
 
-model.fimm.and.ohsu <- function(ohsu.dss.arg, ohsu.expr.arg, ohsu.genomic.arg, ohsu.clinical.arg, ohsu.common.drugs, ohsu.drugs, fimm.dss.arg, fimm.expr.arg, fimm.genomic.arg, fimm.clinical.arg, fimm.common.drugs, fimm.drugs, response.col, seed = 1234, train.on.ohsu = TRUE) {
+get.fit.coeff <- function(fit, model) {
+
+  if(model == "glmnet") {
+    tmp <- coefficients(fit, s = "lambda.min")
+    c1 <- as.vector(tmp)
+    names(c1) <- rownames(tmp)
+  } else {
+    col <- colnames(importance(fit))[1]
+    ## NB: %IncMSE = [ mse(j) - mse0 ] / mse0 * 100  [ mse(j): permuted; mse0: original MSE ]
+    ## i.e., larger/more positive %IncMSE is better
+    if(!grepl(col, pattern="IncMSE")) { stop(paste0("Was expected ", col, " to be %IncMSE\n")) }
+    coeffs <- importance(fit)[,1,drop=FALSE]
+    c1 <- coeffs[,1]
+    names(c1) <- rownames(coeffs)
+  }
+  return(c1)
+}
+
+res.list.to.table <- function(res.list) {
+  tbl.full <- ldply(names(res.list[["all.comparisons"]]),
+               .fun = function(train.set) {
+                        ldply(names(res.list[["all.comparisons"]][[train.set]]), 
+                              .fun = function(test.set) {
+                                       ldply(names(res.list[["all.comparisons"]][[train.set]][[test.set]]),
+                                             .fun = function(gene.set) {
+                                                      tmp.auc <- extract.results(res.list[["all.comparisons"]][[train.set]][[test.set]][[gene.set]])
+                                                      tmp.auc$train.set <- train.set
+                                                      tmp.auc$test.set <- test.set
+                                                      tmp.auc$gene.set <- gene.set
+                                                      tmp.auc$response <- "AUC"
+
+                                                      tmp.features <- extract.features(res.list[["all.fits"]][[train.set]][[gene.set]], s = "lambda.min")
+                                                      tmp.auc <- merge(tmp.auc, tmp.features, all.x = TRUE, all.y = FALSE)
+                                                      return(tmp.auc)                         
+                                                    }) 
+                                     }) 
+                      })
+  tbl.full
+}
+
+
+common.markers <- function(res.auc, gene.set, ds1, drug1, ds2, drug2, alpha = 0, model = "glmnet", top = 20) {
+  foo <- extract.fit(res.auc[["all.fits"]][[ds1]][[gene.set]], train.drug = drug1, alpha = alpha, model = model)
+  bar <- extract.fit(res.auc[["all.fits"]][[ds2]][[gene.set]], train.drug = drug2, alpha = alpha, model = model)
+  c1 <- get.fit.coeff(foo, model)
+  c2 <- get.fit.coeff(bar, model)
+  c1 <- c1[!grepl(pattern="Intercept", names(c1))]
+  c2 <- c2[!grepl(pattern="Intercept", names(c2))]
+  c2 <- c2[names(c1)]
+  
+  flag <- which(names(c1) %in% intersect(names(c1),names(c2)))
+  if(top != 0) { 
+    if(FALSE) {
+    r1 <- rank(c1)
+    r2 <- rank(c2)
+    flag <- (r1 < top) & (r2 < top)
+
+    r1 <- rank(-c1)
+    r2 <- rank(-c2)
+    flag <- flag | ( (r1 < top) & (r2 < top) )
+    }
+    switch(model,
+      "glmnet" = {
+        r1 <- rank(abs(c1))
+        r2 <- rank(abs(c2))
+      },
+      "rf" = {
+        r1 <- rank(-1 * c1)
+        r2 <- rank(-1 * c2)
+      },
+      { stop(paste0("Unknown model: ", model, "\n")) })
+    flag <- (r1 < top) & (r2 < top) & sign(c1) == sign(c2)
+  }
+  return(names(c1)[flag])
+}
+
+extract.table <- function(res.aucs, train.set.names, gene.sets, s = "lambda.min") {
+ trn.tbl <- ldply(train.set.names,
+             .fun = function(train.set) {
+                      ldply(names(gene.sets),
+                        .fun = function(gene.set) {
+                                 ldply(res.aucs[[1]][["all.fits"]][[train.set]][[gene.set]],
+                                   .fun = function(lst) {
+                                     ldply(lst, 
+                                       .fun = function(df) {
+                                         ## Only pull out the regression and rf results
+                                         if((df$model != "glmnet") && (df$model != "rf")) { return(NULL) }
+                                         coeffs <- NULL
+                                         if(is.null(df$fit) || is.na(df$fit)) { return(NULL) }
+                                         switch(df$model,
+                                           "glmnet" = {
+                                             coeffs <- coefficients(df$fit, s = s)
+                                           },
+                                           "rf" = {
+                                             col <- colnames(importance(df$fit))[1]
+                                             ## NB: %IncMSE = [ mse(j) - mse0 ] / mse0 * 100  [ mse(j): permuted; mse0: original MSE ]
+                                             ## i.e., larger/more positive %IncMSE is better
+                                             if(!grepl(col, pattern="IncMSE")) { stop(paste0("Was expected ", col, " to be %IncMSE\n")) }
+                                             coeffs <- importance(df$fit)[,1,drop=FALSE]
+                                           },
+                                           { stop(paste0("Unknown model ", df$model, "\n")) })
+                                         ns <- rownames(coeffs)
+                                         coeffs <- as.vector(coeffs)
+                                         names(coeffs) <- ns
+                                         coeffs <- coeffs[!grepl(pattern="Intercept", names(coeffs))]
+##                                         n.features <- length(coeffs) 
+n.features <- df$n.features
+                                         coeffs <- coeffs[order(names(coeffs))]
+                                         coeff.vals <- paste(coeffs, collapse=",")
+                                         coeffs <- paste(names(coeffs), collapse=",")
+                                         ret <- data.frame(train.set = train.set, gene.set = gene.set, train.drug = df$train.drug,
+                                                           alpha = df$alpha, model = df$model, n.features = n.features, coeffs = coeffs, coeff.vals = coeff.vals)
+                                         ret
+                                       })
+                                   })
+                        })
+             })
+  trn.tbl$model <- as.character(trn.tbl$model)
+  trn.tbl$train.drug <- as.character(trn.tbl$train.drug)
+  trn.tbl$coeffs <- as.character(trn.tbl$coeffs)
+  trn.tbl[(trn.tbl$model == "glmnet") & (trn.tbl$alpha == 0),"model"] <- "ridge"
+  trn.tbl[(trn.tbl$model == "glmnet") & (trn.tbl$alpha == 1),"model"] <- "lasso"
+  trn.tbl
+}
+
+extract.table.2 <- function(res.auc, s = "lambda.min") {
+ trn.tbl <- ldply(names(res.auc[["all.fits"]]),
+             .fun = function(train.set) {
+                      ldply(names(res.auc[["all.fits"]][[train.set]]),
+                        .fun = function(gene.set) {
+                                 ldply(res.auc[["all.fits"]][[train.set]][[gene.set]],
+                                   .fun = function(lst) {
+                                     ldply(lst, 
+                                       .fun = function(df) {
+                                         ## Only pull out the regression and rf results
+                                         if((df$model != "glmnet") && (df$model != "rf")) { return(NULL) }
+                                         coeffs <- NULL
+                                         if(is.null(df$fit) || is.na(df$fit)) { return(NULL) }
+                                         switch(df$model,
+                                           "glmnet" = {
+                                             coeffs <- coefficients(df$fit, s = s)
+                                           },
+                                           "rf" = {
+                                             col <- colnames(importance(df$fit))[1]
+                                             ## NB: %IncMSE = [ mse(j) - mse0 ] / mse0 * 100  [ mse(j): permuted; mse0: original MSE ]
+                                             ## i.e., larger/more positive %IncMSE is better
+                                             if(!grepl(col, pattern="IncMSE")) { stop(paste0("Was expected ", col, " to be %IncMSE\n")) }
+                                             coeffs <- importance(df$fit)[,1,drop=FALSE]
+                                           },
+                                           { stop(paste0("Unknown model ", df$model, "\n")) })
+                                         ns <- rownames(coeffs)
+                                         coeffs <- as.vector(coeffs)
+                                         names(coeffs) <- ns
+                                         coeffs <- coeffs[!grepl(pattern="Intercept", names(coeffs))]
+##                                         n.features <- length(coeffs) 
+n.features <- df$n.features
+                                         coeffs <- coeffs[order(names(coeffs))]
+                                         coeff.vals <- paste(coeffs, collapse=",")
+                                         coeffs <- paste(names(coeffs), collapse=",")
+                                         ret <- data.frame(train.set = train.set, gene.set = gene.set, train.drug = df$train.drug,
+                                                           alpha = df$alpha, model = df$model, n.features = n.features, coeffs = coeffs, coeff.vals = coeff.vals)
+                                         ret
+                                       })
+                                   })
+                        })
+             })
+  trn.tbl$model <- as.character(trn.tbl$model)
+  trn.tbl$train.drug <- as.character(trn.tbl$train.drug)
+  trn.tbl$coeffs <- as.character(trn.tbl$coeffs)
+  trn.tbl[(trn.tbl$model == "glmnet") & (trn.tbl$alpha == 0),"model"] <- "ridge"
+  trn.tbl[(trn.tbl$model == "glmnet") & (trn.tbl$alpha == 1),"model"] <- "lasso"
+  trn.tbl
+}
+
+## transform = c("none", "abs", "negate")
+## top = # of features to consider in overall
+## top = 0 -> use all
+find.overlap.of.sparse.predictors <- function(tbl.input, universe, transform, top, gene.sets = NULL, verbose = FALSE) {
+  ret.tbl <- c()
+  for(gs in unique(tbl.input$gene.set)) {
+    tmp <- subset(tbl.input, gene.set == gs)
+    tr.sets <- as.character(unique(tmp$train.set))
+    for(i in 1:(length(tr.sets)-1)) {
+      tr1 <- tr.sets[i]
+      tmp1 <- subset(tmp, train.set == tr1)
+      merge.col <- drug.name.col
+      tmp1 <- merge(drug.name.tbl, tmp1, by.x = merge.col, by.y = "train.drug")
+      for(j in (i+1):length(tr.sets)) {
+        tr2 <- tr.sets[j]
+        if(((tr1 == "ohsu") || (tr2 == "ohsu")) && (grepl(pattern="ohsu.set1", paste0(tr1,tr2)) || grepl(pattern="ohsu.set2", paste0(tr1,tr2)))) { next }
+        if(((tr1 == "fimm") || (tr2 == "fimm")) && (grepl(pattern="fimm.set1", paste0(tr1,tr2)) || grepl(pattern="fimm.set2", paste0(tr1,tr2)))) { next }
+        tmp2 <- subset(tmp, train.set == tr2)
+        merge.col <- drug.name.col
+        tmp2 <- merge(drug.name.tbl, tmp2, by.x = merge.col, by.y = "train.drug")
+        tmp1$id.1 <- 1:nrow(tmp1)
+        m <- merge(tmp1, tmp2, by = merge.col, suffixes = c(".1", ".2"))
+        m <- m[, c(merge.col, "id.1", "n.features.1", "n.features.2", "coeffs.1", "coeffs.2", "coeff.vals.1", "coeff.vals.2", "train.set.1", "train.set.2", "gene.set.1")]
+
+        m$id <- 1:nrow(m)
+        hyp <- ddply(m, .variables = "id.1", .parallel = FALSE,
+                     .fun = function(r1) {
+                        n.f1 <- as.numeric(r1$n.features.1)
+                        coeff.vals.1 <- as.numeric(unlist(strsplit(as.character(r1$coeff.vals.1), split=",")))
+                        coeffs.1 <- (unlist(strsplit(as.character(r1$coeffs.1), split=",")))
+                        names(coeff.vals.1) <- coeffs.1
+                        coeffs.1 <- coeff.vals.1
+                        switch(transform,
+                          "drop.zero" = { 
+                             coeffs.1 <- coeffs.1[coeffs.1 > 0]
+                          },
+                          "none" = { },
+                          "abs" = {
+                             coeffs.1 <- abs(coeffs.1)
+                          },
+                          "abs.drop.zero" = {
+                             coeffs.1 <- abs(coeffs.1)
+                             coeffs.1 <- coeffs.1[coeffs.1 != 0]
+                          },
+                          "negate" = {
+                             coeffs.1 <- - coeffs.1
+                          })
+
+                        ddply(r1, .variables = "id", .parallel = FALSE,
+                              .fun = function(r) {
+                        n.f2 <- as.numeric(r$n.features.2)
+                                 coeff.vals.2 <- as.numeric(unlist(strsplit(as.character(r$coeff.vals.2), split=",")))
+                                 coeffs.2 <- (unlist(strsplit(as.character(r$coeffs.2), split=",")))
+                                 names(coeff.vals.2) <- coeffs.2
+                                 coeffs.2 <- coeff.vals.2
+                                 switch(transform,
+                                   "drop.zero" = { 
+                                      coeffs.2 <- coeffs.2[coeffs.2 > 0]
+                                   },
+                                   "none" = { },
+                                   "abs" = {
+                                      coeffs.2 <- abs(coeffs.2)
+                                   },
+                                   "abs.drop.zero" = {
+                                      coeffs.2 <- abs(coeffs.2)
+                                      coeffs.2 <- coeffs.2[coeffs.2 != 0]
+                                   },
+                                   "negate" = {
+                                      coeffs.2 <- - coeffs.2
+                                   })
+
+                                 ldply(top, .parallel = FALSE,
+                                       .fun = function(sz) {
+                                                c1 <- coeffs.1
+                                                c2 <- coeffs.2
+                                                if(length(c1) > 0) {
+                                                  c1 <- c1[!duplicated(names(c1))]
+                                                }
+                                                if(length(c2) > 0) {
+                                                  c2 <- c2[!duplicated(names(c2))]
+                                                }
+c1 <- c1[is.finite(c1)]
+c2 <- c2[is.finite(c2)]
+## Drop any mean response
+c1 <- c1[!grepl(pattern="mean", names(c1))]
+c2 <- c2[!grepl(pattern="mean", names(c2))]
+if(any(grepl(pattern="mean", universe))) {
+n.f1 <- n.f1 - 1
+n.f2 <- n.f2 - 1
+}
+                                                c1.len <- min(sz, length(c1))
+                                                if((sz != 0) && (length(c1) > 0)) {
+                                                  c1 <- sort(c1, decreasing=TRUE)
+                                                  c1 <- c1[1:c1.len]
+                                                }
+
+                                                
+                                                c2.len <- min(sz, length(c2))
+                                                if((sz != 0) && (length(c2) > 0)) {
+                                                  c2 <- sort(c2, decreasing=TRUE)
+                                                  c2 <- c2[1:c2.len]
+                                                }
+                                                n.1 <- length(c1)
+                                                n.2 <- length(c2)
+                                                both <- intersect(names(c1), names(c2))
+                                                n.both <- length(both)
+                                                both <- paste(both, collapse=",")
+                                                ## pval <- phyper(q = n.both - 1, m = n.1, n = n.f1 - n.1, k = n.2, lower.tail = FALSE) 
+## if(n.f1 != n.f2) { stop(paste0(r[,drug.name.col], ": n.f1 (", n.f1, ") != n.f2 (", n.f2, ")\n")) }
+n.expected <- c1.len * c2.len / max(n.f1, n.f2)
+
+##if(any(grepl(pattern="mean", names(c1)))) {
+##  stop(paste0(paste(names(c1)[grepl(pattern="mean", names(c1))], collapse=", "), "\n"))
+##}
+##if(any(grepl(pattern="mean", names(c2)))) {
+##  stop(paste0(paste(names(c2)[grepl(pattern="mean", names(c2))], collapse=", "), "\n"))
+##}
+n.1 <- length(setdiff(names(c1),names(c2)))
+n.2 <- length(setdiff(names(c2),names(c1)))
+## n.neither <- length(setdiff(universe, union(names(c1),names(c2))))
+n.neither <- max(n.f1, n.f2) - n.1 - n.2 - n.both
+if(n.neither < 0) { stop(paste0("n.neither < 0: ", paste(n.neither, sz, c1.len, c2.len, n.f1, n.f2, n.1, n.2, n.both, sep=" "), "\n")) }
+if(n.neither < 0) {
+stop(paste0(paste(setdiff(names(c2),names(c1)), collapse=","), "\n"))
+stop(paste0(paste(setdiff(names(c1),names(c2)), collapse=","), "\n"))
+stop(paste0(both, "\n"))
+}
+mat <- cbind(c(n.both, n.1), c(n.2, n.neither))
+##                                                mat <- cbind(c(n.both, n.1 - n.both), c(n.2 - n.both, n.f1 - n.1))
+                                                fet <- fisher.test(mat, alternative = "greater")
+                                                pval <- fet$p.value
+if(verbose) {
+  print(mat)
+  print(fet)
+  print(pval)
+}
+                                                vec <- c(r$id[1], n.1, n.2, n.both, n.neither, n.expected, both, pval, sz)
+                                                names(vec) <- c("id", "n.1", "n.2", "n.both", "n.neither", "n.expected", "both", "pval", "top")
+                                                vec
+                                  })
+                               })
+                             })
+        hyp <- hyp[, !grepl(pattern="id.1", x=colnames(hyp))]
+        m <- m[, !grepl(pattern="id.1", x=colnames(m))]
+        hyp <- merge(hyp, m, by = "id")
+        ret.tbl <- rbind(ret.tbl, hyp)
+      }
+    }
+  }
+  ret.tbl
+}
+
+
+## transform = c("none", "abs", "negate")
+## top = # of features to consider in overall
+## top = 0 -> use all
+old.find.overlap.of.sparse.predictors <- function(tbl.input, transform, top) {
+  ret.tbl <- c()
+  for(gs in unique(tbl.input$gene.set)) {
+    tmp <- subset(tbl.input, gene.set == gs)
+    tr.sets <- as.character(unique(tmp$train.set))
+    for(i in 1:(length(tr.sets)-1)) {
+      tr1 <- tr.sets[i]
+      tmp1 <- subset(tmp, train.set == tr1)
+      merge.col <- drug.name.col
+      tmp1 <- merge(drug.name.tbl, tmp1, by.x = merge.col, by.y = "train.drug")
+      for(j in (i+1):length(tr.sets)) {
+        tr2 <- tr.sets[j]
+        if(((tr1 == "ohsu") || (tr2 == "ohsu")) && (grepl(pattern="ohsu.set1", paste0(tr1,tr2)) || grepl(pattern="ohsu.set2", paste0(tr1,tr2)))) { next }
+        if(((tr1 == "fimm") || (tr2 == "fimm")) && (grepl(pattern="fimm.set1", paste0(tr1,tr2)) || grepl(pattern="fimm.set2", paste0(tr1,tr2)))) { next }
+        tmp2 <- subset(tmp, train.set == tr2)
+        merge.col <- drug.name.col
+        tmp2 <- merge(drug.name.tbl, tmp2, by.x = merge.col, by.y = "train.drug")
+
+        m <- merge(tmp1, tmp2, by = merge.col, suffixes = c(".1", ".2"))
+        m <- m[, c(merge.col, "n.features.1", "coeffs.1", "coeffs.2", "coeff.vals.1", "coeff.vals.2", "train.set.1", "train.set.2", "gene.set.1")]
+        m$id <- 1:nrow(m)
+        hyp <- ddply(m, .variables = "id", 
+               .fun = function(r) {
+                        n.f <- max(as.numeric(r$n.features.1), as.numeric(r$n.features.2))
+                        coeff.vals.1 <- as.numeric(unlist(strsplit(as.character(r$coeff.vals.1), split=",")))
+                        coeffs.1 <- (unlist(strsplit(as.character(r$coeffs.1), split=",")))
+                        names(coeff.vals.1) <- coeffs.1
+                        coeffs.1 <- coeff.vals.1
+                        coeff.vals.2 <- as.numeric(unlist(strsplit(as.character(r$coeff.vals.2), split=",")))
+                        coeffs.2 <- (unlist(strsplit(as.character(r$coeffs.2), split=",")))
+                        names(coeff.vals.2) <- coeffs.2
+                        coeffs.2 <- coeff.vals.2
+                        switch(transform,
+                          "drop.zero" = { 
+                             coeffs.1 <- coeffs.1[coeffs.1 != 0]
+                             coeffs.2 <- coeffs.2[coeffs.2 != 0]
+                          },
+                          "none" = { },
+                          "abs.drop.zero" = {
+                             coeffs.1 <- abs(coeffs.1)
+                             coeffs.2 <- abs(coeffs.2)
+                             coeffs.1 <- coeffs.1[coeffs.1 != 0]
+                             coeffs.2 <- coeffs.2[coeffs.2 != 0]
+                          },
+                          "abs" = {
+                             coeffs.1 <- abs(coeffs.1)
+                             coeffs.2 <- abs(coeffs.2)
+                          },
+                          "negate" = {
+                             coeffs.1 <- - coeffs.1
+                             coeffs.2 <- - coeffs.2
+                          })
+                        if(top != 0) {
+                          coeffs.1 <- sort(coeffs.1, decreasing=TRUE)
+                          coeffs.2 <- sort(coeffs.2, decreasing=TRUE)
+                          coeffs.1 <- coeffs.1[1:min(top, length(coeffs.1))]
+                          coeffs.2 <- coeffs.2[1:min(top, length(coeffs.2))]
+                        }
+                        n.1 <- length(setdiff(names(coeffs.1), names(coeffs.2)))
+                        n.2 <- length(setdiff(names(coeffs.2), names(coeffs.1)))
+                        both <- intersect(names(coeffs.1), names(coeffs.2))
+                        n.both <- length(both)
+                        n.neither <- n.f - n.1 - n.2 - n.both
+                        both <- paste(both, collapse=",")
+                        ## pval <- phyper(q = n.both - 1, m = n.1, n = n.f - n.1, k = n.2, lower.tail = FALSE) 
+                        mat <- cbind(c(n.both, n.1), c(n.2, n.neither))
+                        fet <- fisher.test(mat, alternative = "greater")
+                        pval <- fet$p.value
+                        vec <- c(r$id[1], n.1, n.2, n.both, both, pval)
+                        names(vec) <- c("id", "n.1", "n.2", "n.both", "both", "pval")
+                        vec
+                      })
+        hyp <- merge(hyp, m, by = "id")
+        ret.tbl <- rbind(ret.tbl, hyp)
+      }
+    }
+  }
+  ret.tbl
+}
+
+## Looking at correlation of coefficients
+## method = c("pearson", "spearman", "kendall")
+find.overlap.of.dense.predictors <- function(tbl.input, method) {
+  ret.tbl <- c()
+  for(gs in unique(tbl.input$gene.set)) {
+    tmp <- subset(tbl.input, gene.set == gs)
+    tr.sets <- as.character(unique(tmp$train.set))
+    for(i in 1:(length(tr.sets)-1)) {
+      tr1 <- tr.sets[i]
+      tmp1 <- subset(tmp, train.set == tr1)
+      merge.col <- drug.name.col
+      tmp1 <- merge(drug.name.tbl, tmp1, by.x = merge.col, by.y = "train.drug")
+      for(j in (i+1):length(tr.sets)) {
+        tr2 <- tr.sets[j]
+        if(((tr1 == "ohsu") || (tr2 == "ohsu")) && (grepl(pattern="ohsu.set1", paste0(tr1,tr2)) || grepl(pattern="ohsu.set2", paste0(tr1,tr2)))) { next }
+        if(((tr1 == "fimm") || (tr2 == "fimm")) && (grepl(pattern="fimm.set1", paste0(tr1,tr2)) || grepl(pattern="fimm.set2", paste0(tr1,tr2)))) { next }
+        tmp2 <- subset(tmp, train.set == tr2)
+        merge.col <- drug.name.col
+        tmp2 <- merge(drug.name.tbl, tmp2, by.x = merge.col, by.y = "train.drug")
+  
+        m <- merge(tmp1, tmp2, by = merge.col, suffixes = c(".1", ".2"))
+        m <- m[, c(merge.col, "n.features.1", "coeffs.1", "coeffs.2", "coeff.vals.1", "coeff.vals.2", "train.set.1", "train.set.2", "gene.set.1")]
+        m$id <- 1:nrow(m)
+        hyp <- ddply(m, .variables = "id",
+               .fun = function(r) {
+                        coeff.vals.1 <- as.numeric(unlist(strsplit(as.character(r$coeff.vals.1), split=",")))
+                        coeffs.1 <- (unlist(strsplit(as.character(r$coeffs.1), split=",")))
+                        names(coeff.vals.1) <- coeffs.1
+                        coeffs.1 <- coeff.vals.1
+                        coeff.vals.2 <- as.numeric(unlist(strsplit(as.character(r$coeff.vals.2), split=",")))
+                        coeffs.2 <- (unlist(strsplit(as.character(r$coeffs.2), split=",")))
+                        names(coeff.vals.2) <- coeffs.2
+                        coeffs.2 <- coeff.vals.2
+                        inter <- intersect(names(coeffs.1), names(coeffs.2))
+                        ct <- cor.test(coeffs.1[inter], coeffs.2[inter], method = method)
+                        pval <- ct$p.value
+                        cor <- ct$estimate
+                        vec <- c(r$id[1], cor, pval)
+                        names(vec) <- c("id", "cor", "pval")
+                        vec
+                      })
+        hyp <- merge(hyp, m, by = "id")
+        ret.tbl <- rbind(ret.tbl, hyp)
+      }
+    }
+  }
+  ret.tbl
+}
+
+model.fimm.and.ohsu <- function(ohsu.dss.arg, ohsu.expr.arg, ohsu.genomic.arg, ohsu.clinical.arg, ohsu.common.drugs, ohsu.drugs, fimm.dss.arg, fimm.expr.arg, fimm.genomic.arg, fimm.clinical.arg, fimm.common.drugs, fimm.drugs, response.col, seed = 1234, train.on.ohsu = TRUE, alphas = c(0, 1)) {
 
    l <- prepare.ohsu.drug.response.and.expr.matrices(ohsu.dss.arg, ohsu.expr.arg, rnaseq.summary.df = NULL, drugs = ohsu.common.drugs, response.col = response.col)
    ohsu.drc <- l[["drc.df"]]
@@ -196,14 +655,17 @@ model.fimm.and.ohsu <- function(ohsu.dss.arg, ohsu.expr.arg, ohsu.genomic.arg, o
                          ## Apply fit to test/validation data
 
                          ## Use glmnet
-                         alphas <- c(0, 0.25, 0.5, 0.7, 1)
-                         alphas <- c(0, 1)
+                         ## alphas <- c(0, 0.25, 0.5, 0.7, 1)
+                         ## alphas <- c(0, 1)
+                         N <- length(y)
+                         foldid <- sample(rep(seq(nfolds), length = N))
+
                          svalues <- c("lambda.min", "lambda.1se")
                          svalues <- c("lambda.min")
                          for(alpha in alphas) {
                            for(s in svalues) {
                              set.seed(seed)
-                             fit <- tryCatch({cv.glmnet(x = t(x), y, family = "gaussian", type.measure = "mse", nfolds = nfolds, alpha = alpha, standardize = FALSE, parallel = TRUE)}, error = function(e) { cat("glmnet err\n"); return(NA) })
+                             fit <- tryCatch({cv.glmnet(x = t(x), y, family = "gaussian", type.measure = "mse", nfolds = nfolds, foldid = foldid, alpha = alpha, standardize = FALSE, parallel = TRUE)}, error = function(e) { cat("glmnet err\n"); return(NA) })
                              pred <- tryCatch({predict(fit, newx=t(newx), s = s)}, error = function(e) { cat("glmnet pred err\n"); return(NA) })
                              ret.list[[length(ret.list)+1]] <- list(train.drug = train.drug, test.drug = test.drug, predicted = pred, actual = newy, fit = fit, alpha = alpha, s = s, model = "glmnet", n.train = n.train, n.test = n.test)
                            }
@@ -211,7 +673,7 @@ model.fimm.and.ohsu <- function(ohsu.dss.arg, ohsu.expr.arg, ohsu.genomic.arg, o
 
                          ## Use RF
                          set.seed(seed)
-                         fit <- tryCatch({randomForest(x = t(x), y)}, error = function(e) { cat("rf error\n"); return(NA) })
+                         fit <- tryCatch({randomForest(x = t(x), y, importance = TRUE, keep.forest = TRUE)}, error = function(e) { cat("rf error\n"); return(NA) })
                          pred <- tryCatch({predict(fit, t(newx))}, error = function(e) { cat("rf pred error\n"); return(NA) })
                          ret.list[[length(ret.list)+1]] <- list(train.drug = train.drug, test.drug = test.drug, predicted = pred, actual = newy, fit = fit, alpha = NA, s = NA, model = "rf", n.train = n.train, n.test = n.test)
 
@@ -225,7 +687,7 @@ model.fimm.and.ohsu <- function(ohsu.dss.arg, ohsu.expr.arg, ohsu.genomic.arg, o
    ret
 } 
 
-model.train.and.test <- function(train.dss.arg, train.expr.arg, train.genomic.arg, train.clinical.arg, train.common.drugs, train.drugs, train.drug.col, train.patient.col, train.response.col, test.dss.arg, test.expr.arg, test.genomic.arg, test.clinical.arg, test.common.drugs, test.drugs, test.drug.col, test.patient.col, test.response.col, seed = 1234, use.rf = FALSE, use.svm = FALSE, use.ridge = TRUE, use.mean = TRUE) {
+model.train.and.test <- function(train.dss.arg, train.expr.arg, train.genomic.arg, train.clinical.arg, train.common.drugs, train.drugs, train.drug.col, train.patient.col, train.response.col, test.dss.arg, test.expr.arg, test.genomic.arg, test.clinical.arg, test.common.drugs, test.drugs, test.drug.col, test.patient.col, test.response.col, seed = 1234, use.rf = FALSE, use.svm = FALSE, use.ridge = TRUE, use.mean = TRUE, alphas = c(0, 1)) {
 
    l <- prepare.drug.response.and.expr.matrices(train.dss.arg, train.expr.arg, drugs = train.common.drugs, drug.col = train.drug.col, patient.col = train.patient.col, response.col = train.response.col)
    train.drc <- l[["drc.df"]]
@@ -369,17 +831,19 @@ model.train.and.test <- function(train.dss.arg, train.expr.arg, train.genomic.ar
                          nfolds <- 5 
                          ret.list <- list()
                          ## Apply fit to test/validation data
+                         N <- length(y)
+                         foldid <- sample(rep(seq(nfolds), length = N))
 
                          ## Use glmnet
-                         alphas <- c(0, 0.25, 0.5, 0.7, 1)
-                         alphas <- c(0, 1)
+                         ## alphas <- c(0, 0.25, 0.5, 0.7, 1)
+                         ## alphas <- c(0, 1)
                          if(!use.ridge) { alphas <- alphas[alphas != 0] }
                          svalues <- c("lambda.min", "lambda.1se")
                          svalues <- c("lambda.min")
                          for(alpha in alphas) {
                            for(s in svalues) {
                              set.seed(seed)
-                             fit <- tryCatch({cv.glmnet(x = t(x), y, family = "gaussian", type.measure = "mse", nfolds = nfolds, alpha = alpha, standardize = FALSE, parallel = TRUE)}, error = function(e) { cat("glmnet err\n"); return(NA) })
+                             fit <- tryCatch({cv.glmnet(x = t(x), y, family = "gaussian", type.measure = "mse", nfolds = nfolds, foldid = foldid, alpha = alpha, standardize = FALSE, parallel = TRUE)}, error = function(e) { cat("glmnet err\n"); return(NA) })
                              pred <- tryCatch({predict(fit, newx=t(newx), s = s)}, error = function(e) { cat("glmnet pred err\n"); return(NA) })
                              ret.list[[length(ret.list)+1]] <- list(train.drug = train.drug, test.drug = test.drug, predicted = pred, actual = newy, fit = fit, alpha = alpha, s = s, model = "glmnet", n.train = n.train, n.test = n.test)
                            }
@@ -388,7 +852,7 @@ model.train.and.test <- function(train.dss.arg, train.expr.arg, train.genomic.ar
                          ## Use RF
                          if(use.rf) {
                            set.seed(seed)
-                           fit <- tryCatch({randomForest(x = t(x), y)}, error = function(e) { cat("rf error\n"); return(NA) })
+                           fit <- tryCatch({randomForest(x = t(x), y, importance = TRUE, keep.forest = TRUE)}, error = function(e) { cat("rf error\n"); return(NA) })
                            pred <- tryCatch({predict(fit, t(newx))}, error = function(e) { cat("rf pred error\n"); return(NA) })
                            ret.list[[length(ret.list)+1]] <- list(train.drug = train.drug, test.drug = test.drug, predicted = pred, actual = newy, fit = fit, alpha = NA, s = NA, model = "rf", n.train = n.train, n.test = n.test)
                          }
@@ -504,7 +968,7 @@ test.model <- function(fits, drug.name.tbl, train.drug.col, test.dss.arg, test.e
                                }
                              } else if(model == "rf") {
                                if(use.rf) {
-                                 pred <- tryCatch({predict(fit, newx=t(newx))}, error = function(e) { cat("glmnet pred err\n"); return(NA) })
+                                 pred <- tryCatch({predict(fit, t(newx))}, error = function(e) { cat("glmnet pred err\n"); return(NA) })
                                  ret.list[[length(ret.list)+1]] <- list(train.drug = train.drug, test.drug = test.drug, alpha = alpha, s = s, model = model, predicted = pred, actual = newy, n.test = n.test)
                                }
                              } else if(model == "svm") {
@@ -524,7 +988,7 @@ test.model <- function(fits, drug.name.tbl, train.drug.col, test.dss.arg, test.e
    ret
 } 
 
-test.model.with.downsampling_ <- function(fits, drug.name.tbl, train.drug.col, test.expr, test.genomic, test.clinical, test.drc, test.drug.col, seed = 1234, use.rf = FALSE, use.svm = FALSE, use.ridge = TRUE, use.mean = TRUE, flatten.downsampled.fits = FALSE, num.samples.per.drug = NULL, with.replacement = FALSE) {
+test.model.with.downsampling_ <- function(fits, drug.name.tbl, train.drug.col, test.expr, test.genomic, test.clinical, test.drc, test.drug.col, seed = 1234, use.rf = FALSE, use.svm = FALSE, use.ridge = TRUE, use.mean = TRUE, flatten.downsampled.fits = FALSE, num.samples.per.drug = NULL, with.replacement = FALSE, include.mean.response.as.feature = FALSE, subtract.mean.response = FALSE) {
    z.score.drc <- TRUE
    z.score <- TRUE
    ## Iterate through the fits (on training data) and apply them to the test data.
@@ -550,6 +1014,7 @@ test.model.with.downsampling_ <- function(fits, drug.name.tbl, train.drug.col, t
                              if(!is.null(t.expr)) { t.expr <- t.expr[, !flag] }
                              if(!is.null(t.genomic)) { t.genomic <- t.genomic[, !flag] }
                              if(!is.null(t.clinical)) { t.clinical <- t.clinical[, !flag] }
+                             t.drc <- test.drc[, !flag]
 
                              if(!is.null(num.samples.per.drug)) {
                                set.seed(i)
@@ -563,13 +1028,29 @@ test.model.with.downsampling_ <- function(fits, drug.name.tbl, train.drug.col, t
                                if(!is.null(t.expr)) { t.expr <- t.expr[, indices] }
                                if(!is.null(t.genomic)) { t.genomic <- t.genomic[, indices] }
                                if(!is.null(t.clinical)) { t.clinical <- t.clinical[, indices] }
+
+                               t.drc <- t.drc[, indices]
                              }
+
+                             ## Subtract off the mean response _before_ z-scoring
+                             if(subtract.mean.response) {
+                               t.drc.mean <- unname(colMeans(t.drc, na.rm=TRUE))
+                               t.drc <- t.drc - matrix(t.drc.mean, nrow=nrow(t.drc), ncol=ncol(t.drc), byrow=TRUE)
+                             }
+
                              if(z.score.drc) {
                                y <- (y - mean(y)) / sd(y)
+                               t.drc <- t(scale(t(t.drc), center = TRUE, scale = TRUE))
                              }
 
                              if(z.score) {
                                t.expr <- t(scale(t(t.expr), center = TRUE, scale = TRUE))
+                             }
+
+                             ## Include mean _z-scored_ response
+                             if(include.mean.response.as.feature && !is.null(t.expr)) {
+                               y.mean <- colMeans(t.drc, na.rm=TRUE)
+                               t.expr <- rbind(t.expr, "mean.resp" = unname(y.mean[colnames(t.expr)]))
                              }
 
                              newx <- rbind(t.expr, t.genomic, t.clinical)
@@ -597,7 +1078,7 @@ test.model.with.downsampling_ <- function(fits, drug.name.tbl, train.drug.col, t
                                }
                              } else if(model == "rf") {
                                if(use.rf) {
-                                 pred <- tryCatch({predict(fit, newx=t(newx))}, error = function(e) { cat("glmnet pred err\n"); return(NA) })
+                                 pred <- tryCatch({predict(fit, t(newx))}, error = function(e) { cat("glmnet pred err\n"); return(NA) })
                                  ret.list[[length(ret.list)+1]] <- list(train.drug = train.drug, test.drug = test.drug, alpha = alpha, s = s, model = model, predicted = pred, actual = newy, n.test = n.test)
                                }
                              } else if(model == "svm") {
@@ -635,7 +1116,6 @@ test.model_ <- function(fits, drug.name.tbl, train.drug.col, x.arg, test.drc, te
                          for(i in 1:length(drug.fits)) {
                              train.drug <- drug.fits[[i]]$train.drug
                              test.drug <- drug.name.tbl[drug.name.tbl[, train.drug.col] == train.drug, test.drug.col]
-                             cat(paste0("Testing drug ", test.drug, "\n"))
                              newy <- as.numeric(test.drc[as.character(test.drug),])
                              flag <- is.na(newy)
                              newx <- newx.orig[, !flag]
@@ -649,6 +1129,8 @@ test.model_ <- function(fits, drug.name.tbl, train.drug.col, x.arg, test.drc, te
                              alpha <- drug.fits[[i]]$alpha
                              s <- NA
                              model <- drug.fits[[i]]$model
+
+                             cat(paste0("Testing drug ", test.drug, " (n = ", n.test, ")\n"))
 
                              if(model == "glmnet") {
                                flag <- rownames(newx) %in% rownames(coefficients(fit))
@@ -664,7 +1146,7 @@ test.model_ <- function(fits, drug.name.tbl, train.drug.col, x.arg, test.drc, te
                                }
                              } else if(model == "rf") {
                                if(use.rf) {
-                                 pred <- tryCatch({predict(fit, newx=t(newx))}, error = function(e) { cat("glmnet pred err\n"); return(NA) })
+                                 pred <- tryCatch({predict(fit, t(newx))}, error = function(e) { cat("glmnet pred err\n"); return(NA) })
                                  ret.list[[length(ret.list)+1]] <- list(train.drug = train.drug, test.drug = test.drug, alpha = alpha, s = s, model = model, predicted = pred, actual = newy, n.test = n.test)
                                }
                              } else if(model == "svm") {
@@ -688,34 +1170,38 @@ test.model_ <- function(fits, drug.name.tbl, train.drug.col, x.arg, test.drc, te
 
 
 ## This function does not format the drug or expression data
-train.model_ <- function(x.arg, train.drc, train.drugs, seed = 1234, use.rf = FALSE, use.svm = FALSE, use.ridge = TRUE, use.mean = TRUE, calc.coefficient.pvals = FALSE) {
+train.model_ <- function(x.arg, train.drc, train.drugs, seed = 1234, use.rf = FALSE, use.svm = FALSE, use.ridge = TRUE, use.mean = TRUE, calc.coefficient.pvals = FALSE, alphas = c(0, 1), keep.forest = TRUE) {
 
    ## Fit ridge to training data and apply to validation for each drug independently.
    ret <- llply(1:length(train.drugs),
                 .parallel = TRUE,
                 .fun = function(drug.i) {
                          train.drug <- train.drugs[drug.i]
-                         cat(paste0("Modeling ", train.drug, "\n"))
                          x <- x.arg
                          y <- as.numeric(train.drc[as.character(train.drug),])
                          flag <- is.na(y)
                          x <- x[, !flag]
                          y <- y[!flag]
-
                          n.train <- length(y)
+                         cat(paste0("Modeling ", train.drug, " (n = ", n.train, ")\n"))
 
                          ## Exclude any genes that have no variation in training data set (or were set to NA/NaN by
                          ## z-scoring above)
                          constant.genes <- rownames(x)[unlist(apply(x, 1, function(row) any(!is.finite(row)) || all(row == row[1])))]
                          x <- x[!(rownames(x) %in% constant.genes),]
 
+                         n.features <- nrow(x)
+
                          nfolds <- 5 
                          ret.list <- list()
                          ## Apply fit to test/validation data
+                         N <- length(y)
+                         set.seed(seed)
+                         foldid <- sample(rep(seq(nfolds), length = N))
 
                          ## Use glmnet
-                         alphas <- c(0, 0.25, 0.5, 0.7, 1)
-                         alphas <- c(0, 1)
+                         ## alphas <- c(0, 0.25, 0.5, 0.7, 1)
+                         ## alphas <- c(0, 1)
                          if(!use.ridge) { alphas <- alphas[alphas != 0] }
                          for(alpha in alphas) {
                            pvals <- NA
@@ -726,35 +1212,35 @@ train.model_ <- function(x.arg, train.drc, train.drugs, seed = 1234, use.rf = FA
                              pvals <- fit.lasso$pval
                            }
                            set.seed(seed)
-                           fit <- tryCatch({cv.glmnet(x = t(x), y, family = "gaussian", type.measure = "mse", nfolds = nfolds, alpha = alpha, standardize = FALSE, parallel = TRUE)}, error = function(e) { cat("glmnet err\n"); return(NA) })
-                           ret.list[[length(ret.list)+1]] <- list(train.drug = train.drug, fit = fit, alpha = alpha, model = "glmnet", n.train = n.train, pvals = pvals)
+                           fit <- tryCatch({cv.glmnet(x = t(x), y, family = "gaussian", type.measure = "mse", nfolds = nfolds, foldid = foldid, alpha = alpha, standardize = FALSE, parallel = TRUE)}, error = function(e) { print(e); cat("glmnet err\n"); return(NA) })
+                           ret.list[[length(ret.list)+1]] <- list(train.drug = train.drug, fit = fit, alpha = alpha, model = "glmnet", n.train = n.train, pvals = pvals, n.features = n.features)
                          }
 
                          ## Use RF
                          if(use.rf) {
                            set.seed(seed)
-                           fit <- tryCatch({randomForest(x = t(x), y)}, error = function(e) { cat("rf error\n"); return(NA) })
-                           ret.list[[length(ret.list)+1]] <- list(train.drug = train.drug, fit = fit, alpha = NA, model = "rf", n.train = n.train, pvals = NA)
+                           fit <- tryCatch({randomForest(x = t(x), y, importance = TRUE, keep.forest = keep.forest)}, error = function(e) { cat("rf error\n"); return(NA) })
+                           ret.list[[length(ret.list)+1]] <- list(train.drug = train.drug, fit = fit, alpha = NA, model = "rf", n.train = n.train, pvals = NA, n.features = n.features)
                          }
 
                          ## Use SVM
                          if(use.svm) {
                            set.seed(seed)
                            fit <- tryCatch({svm(x = t(x), y, scale = FALSE)}, error = function(e) { cat("svm error\n"); return(NA) })
-                           ret.list[[length(ret.list)+1]] <- list(train.drug = train.drug, fit = fit, alpha = NA, model = "svm", n.train = n.train, pvals = NA)
+                           ret.list[[length(ret.list)+1]] <- list(train.drug = train.drug, fit = fit, alpha = NA, model = "svm", n.train = n.train, pvals = NA, n.features = n.features)
                          }
 
                          ## Return a baseline in which the prediction is just the mean of training data set
                          if(use.mean) { 
                            pred <- mean(y, na.rm = TRUE)
-                           ret.list[[length(ret.list)+1]] <- list(train.drug = train.drug, fit = pred, alpha = NA, model = "mean", n.train = n.train, pvals = NA)
+                           ret.list[[length(ret.list)+1]] <- list(train.drug = train.drug, fit = pred, alpha = NA, model = "mean", n.train = n.train, pvals = NA, n.features = n.features)
                          }
                          ret.list
                 })
    ret
 } 
 
-train.model.with.downsampling_ <- function(train.expr, train.genomic, train.clinical, train.drc, train.drugs, train.drug.col, train.response.col, seed = 1234, use.rf = FALSE, use.svm = FALSE, use.ridge = TRUE, use.mean = TRUE, calc.coefficient.pvals = FALSE, num.samples.per.drug, num.iterations = 100, with.replacement = FALSE) {
+train.model.with.downsampling_ <- function(train.expr, train.genomic, train.clinical, train.drc, train.drugs, train.drug.col, train.response.col, seed = 1234, use.rf = FALSE, use.svm = FALSE, use.ridge = TRUE, use.mean = TRUE, calc.coefficient.pvals = FALSE, num.samples.per.drug, num.iterations = 100, with.replacement = FALSE, alphas = c(0, 1), include.mean.response.as.feature = FALSE, subtract.mean.response = FALSE, keep.forest = TRUE) {
    z.score.drc <- TRUE
    z.score <- TRUE
    ret <- llply(1:length(train.drugs),
@@ -769,12 +1255,14 @@ train.model.with.downsampling_ <- function(train.expr, train.genomic, train.clin
                                         y <- as.numeric(train.drc[as.character(train.drug),])
                                         flag <- is.na(y)
                                         y <- y[!flag]
+                                        t.drc <- train.drc[, !flag]
                                         t.expr <- train.expr
                                         t.genomic <- train.genomic
                                         t.clinical <- train.clinical
                                         if(!is.null(t.expr)) { t.expr <- t.expr[, !flag] }
                                         if(!is.null(t.genomic)) { t.genomic <- t.genomic[, !flag] }
                                         if(!is.null(t.clinical)) { t.clinical <- t.clinical[, !flag] }
+
                                         set.seed(iter)
 
                                         n.samples <- num.samples.per.drug[num.samples.per.drug[, train.drug.col] == as.character(train.drug), "num.samples"]
@@ -788,12 +1276,27 @@ train.model.with.downsampling_ <- function(train.expr, train.genomic, train.clin
                                         if(!is.null(t.genomic)) { t.genomic <- t.genomic[, indices] }
                                         if(!is.null(t.clinical)) { t.clinical <- t.clinical[, indices] }
 
+                                        t.drc <- t.drc[, indices]
+
+                                        ## Subtract off the mean response _before_ z-scoring
+                                        if(subtract.mean.response) {
+                                          t.drc.mean <- unname(colMeans(t.drc, na.rm=TRUE))
+                                          t.drc <- t.drc - matrix(t.drc.mean, nrow=nrow(t.drc), ncol=ncol(t.drc), byrow=TRUE)
+                                        }
+
                                         if(z.score.drc) {
                                           y <- (y - mean(y)) / sd(y)
+                                          t.drc <- t(scale(t(t.drc), center = TRUE, scale = TRUE))
                                         }
 
                                         if(z.score) {
                                           t.expr <- t(scale(t(t.expr), center = TRUE, scale = TRUE))
+                                        }
+
+                                        ## Include mean _z-scored_ response
+                                        if(include.mean.response.as.feature && !is.null(t.expr)) {
+                                          y.mean <- colMeans(t.drc, na.rm=TRUE)
+                                          t.expr <- rbind(t.expr, "mean.resp" = unname(y.mean[colnames(t.expr)]))
                                         }
 
                                         x <- rbind(t.expr, t.genomic, t.clinical)
@@ -807,10 +1310,13 @@ train.model.with.downsampling_ <- function(train.expr, train.genomic, train.clin
                                         nfolds <- 5 
                                         ret.list <- list()
                                         ## Apply fit to test/validation data
+                                        N <- length(y)
+                           set.seed(seed)
+                                        foldid <- sample(rep(seq(nfolds), length = N))
 
                                         ## Use glmnet
-                                        alphas <- c(0, 0.25, 0.5, 0.7, 1)
-                                        alphas <- c(0, 1)
+                                        ## alphas <- c(0, 0.25, 0.5, 0.7, 1)
+                                        ## alphas <- c(0, 1)
                                         for(alpha in alphas) {
                                           pvals <- NA
                                           if( (alpha == 1) && (calc.coefficient.pvals == TRUE) ) {
@@ -820,14 +1326,14 @@ train.model.with.downsampling_ <- function(train.expr, train.genomic, train.clin
                                             pvals <- fit.lasso$pval
                                           }
                                           set.seed(seed)
-                                          fit <- tryCatch({cv.glmnet(x = t(x), y, family = "gaussian", type.measure = "mse", nfolds = nfolds, alpha = alpha, standardize = FALSE, parallel = TRUE)}, error = function(e) { cat("glmnet err\n"); return(NA) })
+                                          fit <- tryCatch({cv.glmnet(x = t(x), y, family = "gaussian", type.measure = "mse", nfolds = nfolds, foldid = foldid, alpha = alpha, standardize = FALSE, parallel = TRUE)}, error = function(e) { cat("glmnet err\n"); return(NA) })
                                           ret.list[[length(ret.list)+1]] <- list(train.drug = train.drug, fit = fit, alpha = alpha, model = "glmnet", n.train = n.train, pvals = pvals, iter = iter)
                                         }
 
                                         ## Use RF
                                         if(use.rf) {
                                           set.seed(seed)
-                                          fit <- tryCatch({randomForest(x = t(x), y)}, error = function(e) { cat("rf error\n"); return(NA) })
+                                          fit <- tryCatch({randomForest(x = t(x), y, importance = TRUE, keep.forest = keep.forest)}, error = function(e) { cat("rf error\n"); return(NA) })
                                           ret.list[[length(ret.list)+1]] <- list(train.drug = train.drug, fit = fit, alpha = NA, model = "rf", n.train = n.train, pvals = NA, iter = iter)
                                         }
 
@@ -849,7 +1355,7 @@ train.model.with.downsampling_ <- function(train.expr, train.genomic, train.clin
    ret
 }
 
-train.model <- function(train.dss.arg, train.expr.arg, train.genomic.arg, train.clinical.arg, train.common.drugs, train.drugs, train.drug.col, train.patient.col, train.response.col, seed = 1234, use.rf = FALSE, use.svm = FALSE, calc.coefficient.pvals = FALSE) {
+train.model <- function(train.dss.arg, train.expr.arg, train.genomic.arg, train.clinical.arg, train.common.drugs, train.drugs, train.drug.col, train.patient.col, train.response.col, seed = 1234, use.rf = FALSE, use.svm = FALSE, calc.coefficient.pvals = FALSE, alphas = c(0, 1)) {
 
    l <- prepare.drug.response.and.expr.matrices(train.dss.arg, train.expr.arg, drugs = train.common.drugs, drug.col = train.drug.col, patient.col = train.patient.col, response.col = train.response.col)
    train.drc <- l[["drc.df"]]
@@ -921,10 +1427,13 @@ train.model <- function(train.dss.arg, train.expr.arg, train.genomic.arg, train.
                          nfolds <- 5 
                          ret.list <- list()
                          ## Apply fit to test/validation data
+                         N <- length(y)
+                           set.seed(seed)
+                         foldid <- sample(rep(seq(nfolds), length = N))
 
                          ## Use glmnet
-                         alphas <- c(0, 0.25, 0.5, 0.7, 1)
-                         alphas <- c(0, 1)
+                         ## alphas <- c(0, 0.25, 0.5, 0.7, 1)
+                         ## alphas <- c(0, 1)
                          for(alpha in alphas) {
                            pvals <- NA
                            if( (alpha == 1) && (calc.coefficient.pvals == TRUE) ) {
@@ -934,14 +1443,14 @@ train.model <- function(train.dss.arg, train.expr.arg, train.genomic.arg, train.
                              pvals <- fit.lasso$pval
                            }
                            set.seed(seed)
-                           fit <- tryCatch({cv.glmnet(x = t(x), y, family = "gaussian", type.measure = "mse", nfolds = nfolds, alpha = alpha, standardize = FALSE, parallel = TRUE)}, error = function(e) { cat("glmnet err\n"); return(NA) })
+                           fit <- tryCatch({cv.glmnet(x = t(x), y, family = "gaussian", type.measure = "mse", nfolds = nfolds, foldid = foldid, alpha = alpha, standardize = FALSE, parallel = TRUE)}, error = function(e) { cat("glmnet err\n"); return(NA) })
                            ret.list[[length(ret.list)+1]] <- list(train.drug = train.drug, fit = fit, alpha = alpha, model = "glmnet", n.train = n.train, pvals = pvals)
                          }
 
                          ## Use RF
                          if(use.rf) {
                            set.seed(seed)
-                           fit <- tryCatch({randomForest(x = t(x), y)}, error = function(e) { cat("rf error\n"); return(NA) })
+                           fit <- tryCatch({randomForest(x = t(x), y, importance = TRUE, keep.forest = TRUE)}, error = function(e) { cat("rf error\n"); return(NA) })
                            ret.list[[length(ret.list)+1]] <- list(train.drug = train.drug, fit = fit, alpha = NA, model = "rf", n.train = n.train, pvals = NA)
                          }
 
@@ -970,7 +1479,7 @@ fit.elastic.net.alpha <- function(alpha, x, y, foldid, nfolds, seed = 1234, stan
 
 
 
-bootstrap.model <- function(train.dss.arg, train.expr.arg, train.common.drugs, train.drugs, train.drug.col, train.patient.col, train.response.col, seed = 1234, num.bootstraps = 500) {
+bootstrap.model <- function(train.dss.arg, train.expr.arg, train.common.drugs, train.drugs, train.drug.col, train.patient.col, train.response.col, seed = 1234, num.bootstraps = 500, alphas = c(0, 1)) {
 
    l <- prepare.drug.response.and.expr.matrices(train.dss.arg, train.expr.arg, drugs = train.common.drugs, drug.col = train.drug.col, patient.col = train.patient.col, response.col = train.response.col)
    train.drc <- l[["drc.df"]]
@@ -1013,9 +1522,10 @@ bootstrap.model <- function(train.dss.arg, train.expr.arg, train.common.drugs, t
 
                          nfolds <- 5
                          ret.list <- list() 
-                         alphas <- seq(from = 0, to = 1, by = 0.05)
+                         ## alphas <- seq(from = 0, to = 1, by = 0.05)
                          ## alphas <- c(0, 0.25, 0.5, 0.7, 1)
                          N <- length(y.orig)
+                           set.seed(seed)
                          foldid <- sample(rep(seq(nfolds), length = N))
 
                          ret.list <- llply(1:num.bootstraps,
@@ -1054,7 +1564,7 @@ bootstrap.model <- function(train.dss.arg, train.expr.arg, train.common.drugs, t
 
 
 ## Do all train x test data set x metric (e.g., pearson, spearman) x response (e.g., auc, dss2) x data type (e.g., gene-level, pathway-level expression) comparisons
-train.and.test.crossproduct <- function(gene.sets, drug.name.tbl, train.set.names, train.dss.args, train.expr.args, train.genomic.args, train.clinical.args, train.common.drugs, train.drugs, train.drug.cols, train.patient.cols, train.response.cols, test.set.names, test.dss.args, test.expr.args, test.genomic.args, test.clinical.args, test.common.drugs, test.drug.cols, test.patient.cols, test.response.cols, seed = 1234, use.rf = FALSE, use.svm = FALSE, use.ridge = TRUE, use.mean = TRUE, num.processes = 1) {
+train.and.test.crossproduct <- function(gene.sets, drug.name.tbl, train.set.names, train.dss.args, train.expr.args, train.genomic.args, train.clinical.args, train.common.drugs, train.drugs, train.drug.cols, train.patient.cols, train.response.cols, test.set.names, test.dss.args, test.expr.args, test.genomic.args, test.clinical.args, test.common.drugs, test.drug.cols, test.patient.cols, test.response.cols, seed = 1234, use.rf = FALSE, use.svm = FALSE, use.ridge = TRUE, use.mean = TRUE, num.processes = 1, alphas = c(0, 1), include.mean.response.as.feature = FALSE, subtract.mean.response = FALSE, keep.forest = TRUE) {
 
    z.score.expr <- TRUE
    z.score.drc <- TRUE
@@ -1094,6 +1604,13 @@ train.and.test.crossproduct <- function(gene.sets, drug.name.tbl, train.set.name
      }
 
      train.drc <- train.drc[, train.samples]
+
+     ## Subtract off the mean response _before_ z-scoring
+     if(subtract.mean.response) {
+       train.drc.mean <- unname(colMeans(train.drc, na.rm=TRUE))
+       train.drc <- train.drc - matrix(train.drc.mean, nrow=nrow(train.drc), ncol=ncol(train.drc), byrow=TRUE)
+     }
+
      if(z.score.drc) {
          # z-score
          train.drc <- t(scale(t(train.drc), center = TRUE, scale = TRUE))
@@ -1155,11 +1672,16 @@ train.and.test.crossproduct <- function(gene.sets, drug.name.tbl, train.set.name
        }
   
        test.drc <- test.drc[, test.samples]
+       ## Subtract off the mean response _before_ z-scoring
+       if(subtract.mean.response) {
+         test.drc.mean <- unname(colMeans(test.drc, na.rm=TRUE))
+         test.drc <- test.drc - matrix(test.drc.mean, nrow=nrow(test.drc), ncol=ncol(test.drc), byrow=TRUE)
+       }
+
        if(z.score.drc) {
            # z-score
            test.drc <- t(scale(t(test.drc), center = TRUE, scale = TRUE))
        }
-  
        if(!is.null(test.genomic)) {
          test.genomic <- test.genomic[, test.samples]
        }
@@ -1257,6 +1779,13 @@ train.and.test.crossproduct <- function(gene.sets, drug.name.tbl, train.set.name
        if(z.score.expr) {
          train.expr.sets[[train.set]][[gene.set]] <- t(scale(t(train.expr.sets[[train.set]][[gene.set]]), center = TRUE, scale = TRUE))
        }
+       ## Add the mean of the _z-scored_ responses as a feature (but do not zscore them)
+       if(include.mean.response.as.feature) {
+         y.mean <- (colMeans(train.drcs[[train.set]], na.rm=TRUE))
+         train.expr.sets[[train.set]][[gene.set]] <- rbind(train.expr.sets[[train.set]][[gene.set]], "mean.resp" = unname(y.mean[colnames(train.expr.sets[[train.set]][[gene.set]])]))
+cat(paste0("mean response train:\n"))
+print(train.expr.sets[[train.set]][[gene.set]]["mean.resp",])
+       }
      }
    }
 
@@ -1275,6 +1804,13 @@ train.and.test.crossproduct <- function(gene.sets, drug.name.tbl, train.set.name
          ## z-score
          if(z.score.expr) {
            test.expr.sets[[test.set]][[gene.set]] <- t(scale(t(test.expr.sets[[test.set]][[gene.set]]), center = TRUE, scale = TRUE))
+         }
+         ## Add the mean of the _z-scored_ responses as a feature (but do not zscore them)
+         if(include.mean.response.as.feature) {
+           y.mean <- (colMeans(test.drcs[[test.set]], na.rm=TRUE))
+           test.expr.sets[[test.set]][[gene.set]] <- rbind(test.expr.sets[[test.set]][[gene.set]], "mean.resp" = unname(y.mean[colnames(test.expr.sets[[test.set]][[gene.set]])]))
+cat(paste0("mean response test:\n"))
+print(test.expr.sets[[train.set]][[gene.set]]["mean.resp",])
          }
        }
      }
@@ -1299,7 +1835,7 @@ train.and.test.crossproduct <- function(gene.sets, drug.name.tbl, train.set.name
 
        x <- rbind(train.expr.sets[[train.set]][[gene.set]], train.genomics[[train.set]], train.clinicals[[train.set]])
        cat(paste0("Fitting models for train set ", train.set, " and gene.set ", gene.set, "\n"))
-       fits <- train.model_(x, train.drcs[[train.set]], train.drugs[[train.indx]], seed = seed, use.rf = use.rf, use.svm = use.svm, use.ridge = use.ridge, use.mean = use.mean)
+       fits <- train.model_(x, train.drcs[[train.set]], train.drugs[[train.indx]], seed = seed, use.rf = use.rf, use.svm = use.svm, use.ridge = use.ridge, use.mean = use.mean, alphas = alphas, keep.forest = keep.forest)
        all.fits[[train.set]][[gene.set]] <- fits
        rm(x)
        gc()
@@ -1322,7 +1858,7 @@ train.and.test.crossproduct <- function(gene.sets, drug.name.tbl, train.set.name
    return(list("all.comparisons" = all.comparisons, "all.fits" = all.fits))
 }
 
-train.and.test.crossproduct.with.downsampling <- function(gene.sets, drug.name.tbl, train.set.names, train.dss.args, train.expr.args, train.genomic.args, train.clinical.args, train.common.drugs, train.drugs, train.drug.cols, train.patient.cols, train.response.cols, test.set.names, test.dss.args, test.expr.args, test.genomic.args, test.clinical.args, test.common.drugs, test.drug.cols, test.patient.cols, test.response.cols, seed = 1234, use.rf = FALSE, use.svm = FALSE, use.ridge = TRUE, use.mean = TRUE, num.processes = 1, num.train.samples.per.drug, num.test.samples.per.drug, num.iterations = 100, with.replacement = FALSE, return.fits = TRUE) {
+train.and.test.crossproduct.with.downsampling <- function(gene.sets, drug.name.tbl, train.set.names, train.dss.args, train.expr.args, train.genomic.args, train.clinical.args, train.common.drugs, train.drugs, train.drug.cols, train.patient.cols, train.response.cols, test.set.names, test.dss.args, test.expr.args, test.genomic.args, test.clinical.args, test.common.drugs, test.drug.cols, test.patient.cols, test.response.cols, seed = 1234, use.rf = FALSE, use.svm = FALSE, use.ridge = TRUE, use.mean = TRUE, num.processes = 1, num.train.samples.per.drug, num.test.samples.per.drug, num.iterations = 100, with.replacement = FALSE, return.fits = TRUE, include.mean.response.as.feature = FALSE, subtract.mean.response = FALSE, keep.forest = TRUE) {
    z.score.expr <- TRUE
    z.score.drc <- TRUE
 
@@ -1361,6 +1897,7 @@ train.and.test.crossproduct.with.downsampling <- function(gene.sets, drug.name.t
      }
 
      train.drc <- train.drc[, train.samples]
+
 ## We will zscore below after downsampling
 ##     if(z.score.drc) {
 ##         # z-score
@@ -1574,7 +2111,8 @@ train.and.test.crossproduct.with.downsampling <- function(gene.sets, drug.name.t
                                               train.clinical = train.clinicals[[train.set]][[gene.set]], train.drcs[[train.set]], train.drugs[[train.indx]], 
                                               train.drug.col = train.drug.cols[[train.indx]], train.response.col = train.response.cols[[train.indx]],
                                               seed = seed, use.rf = use.rf, use.svm = use.svm, use.ridge = use.ridge, use.mean = use.mean,
-                                              num.samples.per.drug = num.train.samples.per.drug, num.iterations = num.iterations, with.replacement = with.replacement)
+                                              num.samples.per.drug = num.train.samples.per.drug, num.iterations = num.iterations, with.replacement = with.replacement,
+                                              include.mean.response.as.feature = include.mean.response.as.feature, subtract.mean.response = subtract.mean.response, keep.forest = keep.forest)
        if(return.fits) { all.fits[[train.set]][[gene.set]] <- fits }
 
        if(length(test.set.names) > 0) {
@@ -1587,7 +2125,8 @@ train.and.test.crossproduct.with.downsampling <- function(gene.sets, drug.name.t
                                               test.genomic = test.genomics[[test.set]], test.clinical = test.clinicals[[test.set]],
                                               test.drc = test.drcs[[test.set]], test.drug.cols[[test.indx]], 
                                               seed = seed, use.rf = use.rf, use.svm = use.svm, use.ridge = use.ridge, use.mean = use.mean, flatten.downsampled.fits = TRUE, 
-                                              num.samples.per.drug = num.test.samples.per.drug, with.replacement = with.replacement)
+                                              num.samples.per.drug = num.test.samples.per.drug, with.replacement = with.replacement,
+                                              include.mean.response.as.feature = include.mean.response.as.feature, subtract.mean.response = subtract.mean.response)
 
          } ## for(test.indx in 1:length(test.set.names))
        }
@@ -1600,7 +2139,7 @@ train.and.test.crossproduct.with.downsampling <- function(gene.sets, drug.name.t
    return(list("all.comparisons" = all.comparisons, "all.fits" = all.fits))
 }
 
-train.model.with.downsampling <- function(train.dss.arg, train.expr.arg, train.genomic.arg, train.clinical.arg, train.common.drugs, train.drugs, train.drug.col, train.patient.col, train.response.col, seed = 1234, use.rf = FALSE, use.svm = FALSE, calc.coefficient.pvals = FALSE, num.samples.per.drug, num.iterations = 100, with.replacement = FALSE) {  
+train.model.with.downsampling <- function(train.dss.arg, train.expr.arg, train.genomic.arg, train.clinical.arg, train.common.drugs, train.drugs, train.drug.col, train.patient.col, train.response.col, seed = 1234, use.rf = FALSE, use.svm = FALSE, calc.coefficient.pvals = FALSE, num.samples.per.drug, num.iterations = 100, with.replacement = FALSE, alphas = c(0, 1), keep.forest = TRUE) {  
 
    l <- prepare.drug.response.and.expr.matrices(train.dss.arg, train.expr.arg, drugs = train.common.drugs, drug.col = train.drug.col, patient.col = train.patient.col, response.col = train.response.col)
    train.drc <- l[["drc.df"]]
@@ -1705,8 +2244,11 @@ train.model.with.downsampling <- function(train.dss.arg, train.expr.arg, train.g
                                         ## Apply fit to test/validation data
 
                                         ## Use glmnet
-                                        alphas <- c(0, 0.25, 0.5, 0.7, 1)
-                                        alphas <- c(0, 1)
+                                        ## alphas <- c(0, 0.25, 0.5, 0.7, 1)
+                                        ## alphas <- c(0, 1)
+                                        N <- length(y)
+                           set.seed(seed)
+                                        foldid <- sample(rep(seq(nfolds), length = N))
                                         for(alpha in alphas) {
                                           pvals <- NA
                                           if( (alpha == 1) && (calc.coefficient.pvals == TRUE) ) {
@@ -1716,14 +2258,14 @@ train.model.with.downsampling <- function(train.dss.arg, train.expr.arg, train.g
                                             pvals <- fit.lasso$pval
                                           }
                                           set.seed(seed)
-                                          fit <- tryCatch({cv.glmnet(x = t(x), y, family = "gaussian", type.measure = "mse", nfolds = nfolds, alpha = alpha, standardize = FALSE, parallel = TRUE)}, error = function(e) { cat("glmnet err\n"); return(NA) })
+                                          fit <- tryCatch({cv.glmnet(x = t(x), y, family = "gaussian", type.measure = "mse", nfolds = nfolds, foldid = foldid, alpha = alpha, standardize = FALSE, parallel = TRUE)}, error = function(e) { cat("glmnet err\n"); return(NA) })
                                           ret.list[[length(ret.list)+1]] <- list(train.drug = train.drug, fit = fit, alpha = alpha, model = "glmnet", n.train = n.train, pvals = pvals, iter = iter)
                                         }
 
                                         ## Use RF
                                         if(use.rf) {
                                           set.seed(seed)
-                                          fit <- tryCatch({randomForest(x = t(x), y)}, error = function(e) { cat("rf error\n"); return(NA) })
+                                          fit <- tryCatch({randomForest(x = t(x), y, importance = TRUE, keep.forest = keep.forest)}, error = function(e) { cat("rf error\n"); return(NA) })
                                           ret.list[[length(ret.list)+1]] <- list(train.drug = train.drug, fit = fit, alpha = NA, model = "rf", n.train = n.train, pvals = NA, iter = iter)
                                         }
 
@@ -1747,7 +2289,7 @@ train.model.with.downsampling <- function(train.dss.arg, train.expr.arg, train.g
 
                                               
 
-model.train.and.test.with.downsampling <- function(train.dss.arg, train.expr.arg, train.genomic.arg, train.clinical.arg, train.common.drugs, train.drugs, train.drug.col, train.patient.col, train.response.col, test.dss.arg, test.expr.arg, test.genomic.arg, test.clinical.arg, test.common.drugs, test.drugs, test.drug.col, test.patient.col, test.response.col, seed = 1234, use.rf = FALSE, use.svm = FALSE, num.samples.per.drug, num.iterations = 100, with.replacement = FALSE) {  
+model.train.and.test.with.downsampling <- function(train.dss.arg, train.expr.arg, train.genomic.arg, train.clinical.arg, train.common.drugs, train.drugs, train.drug.col, train.patient.col, train.response.col, test.dss.arg, test.expr.arg, test.genomic.arg, test.clinical.arg, test.common.drugs, test.drugs, test.drug.col, test.patient.col, test.response.col, seed = 1234, use.rf = FALSE, use.svm = FALSE, num.samples.per.drug, num.iterations = 100, with.replacement = FALSE, alphas = c(0, 1)) {  
 
    l <- prepare.drug.response.and.expr.matrices(train.dss.arg, train.expr.arg, drugs = train.common.drugs, drug.col = train.drug.col, patient.col = train.patient.col, response.col = train.response.col)
    train.drc <- l[["drc.df"]]
@@ -1926,14 +2468,18 @@ model.train.and.test.with.downsampling <- function(train.dss.arg, train.expr.arg
                                         ## Apply fit to test/validation data
 
                                         ## Use glmnet
-                                        alphas <- c(0, 0.25, 0.5, 0.7, 1)
-                                        alphas <- c(0, 1)
+                                        ## alphas <- c(0, 0.25, 0.5, 0.7, 1)
+                                        ## alphas <- c(0, 1)
+                                        N <- length(y)
+                           set.seed(seed)
+                                        foldid <- sample(rep(seq(nfolds), length = N))
+
                                         svalues <- c("lambda.min", "lambda.1se")
                                         svalues <- c("lambda.min")
                                         for(alpha in alphas) {
                                           for(s in svalues) {
                                             set.seed(seed)
-                                            fit <- tryCatch({cv.glmnet(x = t(x), y, family = "gaussian", type.measure = "mse", nfolds = nfolds, alpha = alpha, standardize = FALSE, parallel = TRUE)}, error = function(e) { cat("glmnet err\n"); return(NA) })
+                                            fit <- tryCatch({cv.glmnet(x = t(x), y, family = "gaussian", type.measure = "mse", nfolds = nfolds, foldid = foldid, alpha = alpha, standardize = FALSE, parallel = TRUE)}, error = function(e) { cat("glmnet err\n"); return(NA) })
                                             pred <- tryCatch({predict(fit, newx=t(newx), s = s)}, error = function(e) { cat("glmnet pred err\n"); return(NA) })
                                             ret.list[[length(ret.list)+1]] <- list(train.drug = train.drug, test.drug = test.drug, predicted = pred, actual = newy, fit = fit, alpha = alpha, s = s, model = "glmnet", n.train = n.train, n.test = n.test, iter = iter)
                                           }
@@ -1942,7 +2488,7 @@ model.train.and.test.with.downsampling <- function(train.dss.arg, train.expr.arg
                                         ## Use RF
                                         if(use.rf) {
                                           set.seed(seed)
-                                          fit <- tryCatch({randomForest(x = t(x), y)}, error = function(e) { cat("rf error\n"); return(NA) })
+                                          fit <- tryCatch({randomForest(x = t(x), y, importance = TRUE, keep.forest = TRUE)}, error = function(e) { cat("rf error\n"); return(NA) })
                                           pred <- tryCatch({predict(fit, t(newx))}, error = function(e) { cat("rf pred error\n"); return(NA) })
                                           ret.list[[length(ret.list)+1]] <- list(train.drug = train.drug, test.drug = test.drug, predicted = pred, actual = newy, fit = fit, alpha = NA, s = NA, model = "rf", n.train = n.train, n.test = n.test, iter = iter)
                                         }
@@ -2074,6 +2620,88 @@ g <- g + geom_beeswarm()
   g
 } 
 
+extract.fit <- function(ret, train.drug, alpha, model) {
+  for(i in 1:length(ret)) {
+    foo <- ret[[i]]
+    for(j in 1:length(foo)) {
+        df <- foo[[j]]
+        flag <- (df$train.drug == train.drug) && (df$model == model)
+        if(!is.na(alpha)) { flag <- flag && (df$alpha == alpha) }
+        if(flag) { return(df$fit) }
+      }
+  }
+  return(NA)
+}
+
+extract.features <- function(ret, s = "lambda.min") {
+  tbl <-
+     ldply(ret,
+             .fun = function(foo) {
+                ldply(foo,
+             .fun = function(df) {
+                      ret <- data.frame(train.drug = df$train.drug, alpha = df$alpha, model = df$model, n.train = df$n.train, features = "")
+                      if((df$model != "glmnet")) { return(ret) }
+                      if(as.numeric(df$alpha) != 1) { return(ret) }
+                      if(is.null(df$fit) || is.na(df$fit)) { return(ret) }
+                      coeffs <- NULL
+                      switch(df$model,
+                        "glmnet" = {
+                          coeffs <- coefficients(df$fit, s = s)
+                        },
+                        "rf" = {
+                          col <- colnames(importance(df$fit))[1]
+                          ## NB: %IncMSE = [ mse(j) - mse0 ] / mse0 * 100  [ mse(j): permuted; mse0: original MSE ]
+                          ## i.e., larger/more positive %IncMSE is better
+                          if(!grepl(col, pattern="IncMSE")) { stop(paste0("Was expected ", col, " to be %IncMSE\n")) }
+                          coeffs <- importance(df$fit)[,1,drop=FALSE]
+                        },
+                        { stop(paste0("Unknown model ", df$model, "\n")) })
+                                         ns <- rownames(coeffs)
+                                         coeffs <- as.vector(coeffs)
+                                         names(coeffs) <- ns
+                                         coeffs <- coeffs[!grepl(pattern="Intercept", names(coeffs))]
+                                         coeffs <- coeffs[coeffs != 0]
+                                         n.features <- length(coeffs) 
+                                         coeffs <- coeffs[order(names(coeffs))]
+                                         coeff.vals <- paste(coeffs, collapse=",")
+                                         coeffs <- paste(names(coeffs), collapse=",")
+
+                      ret$features <- coeffs
+                      ret
+                    }) })
+  tbl$model <- as.character(tbl$model)
+  tbl[(tbl$model == "glmnet") & (tbl$alpha == 0),"model"] <- "ridge"
+  tbl[(tbl$model == "glmnet") & (tbl$alpha == 1),"model"] <- "lasso"
+  tbl
+}
+
+extract.predicted.actual <- function(ret, train.drug, alpha, s, model) {
+  tbl <-
+     ldply(ret,
+             .fun = function(foo) {
+                ldply(foo,
+             .fun = function(df) {
+                ret <- NULL
+                if(!is.na(df$predicted) && (class(df$predicted) != "logical") && (df$n.test > 0)) {
+                  if(df$model != "rf") {
+                    ret <- data.frame(train.drug = df$train.drug, test.drug = df$test.drug, alpha = df$alpha, s = df$s, model = df$model, actual = df$actual, predicted = df$predicted[,1], sample.names = rownames(df$predicted))
+                  } else {
+                    ret <- data.frame(train.drug = df$train.drug, test.drug = df$test.drug, alpha = NA, s = NA, model = df$model, actual = as.vector(df$actual), predicted = as.vector(unname(df$predicted)), sample.names = as.vector(names(df$predicted)))
+                  }
+                }
+                ret
+             }) })
+  ## tbl <- tbl[(tbl$train.drug == train.drug) & (tbl$alpha == alpha) & (tbl$s == s) & (tbl$model == model),]
+  tbl <- tbl[(tbl$train.drug == train.drug) & (tbl$model == model),]
+  if(!is.na(alpha)) {
+    tbl <- tbl[tbl$alpha == alpha, ]
+  }
+  if(!is.na(s)) {
+    tbl <- tbl[tbl$s == s,]
+  }
+  list(actual = tbl$actual, predicted = tbl$predicted, sample.names = as.character(tbl$sample.names))
+}
+
 extract.results <- function(ret) {
   tbl <-
      ldply(ret,
@@ -2081,13 +2709,14 @@ extract.results <- function(ret) {
                 ldply(foo,
              .fun = function(df) {
                 ret <- NULL
-                if((class(df$predicted) != "logical") && !is.na(df$predicted)) {
+                if(!is.na(df$predicted) && (class(df$predicted) != "logical") && (df$n.test > 0)) {
                   method <- "pearson"
-                  ct <- cor.test(df$predicted, df$actual, method = method)
-                  ret <- data.frame(val = ct$estimate, pval = ct$p.value, train.drug = df$train.drug, test.drug = df$test.drug, alpha = df$alpha, s = df$s, model = df$model, metric = method, n.test = df$n.test)
+##                  ct <- cor.test(df$predicted, df$actual, method = method)
+                  ret <- tryCatch({ ct <- cor.test(df$predicted, df$actual, method = method); data.frame(val = ct$estimate, pval = ct$p.value, train.drug = df$train.drug, test.drug = df$test.drug, alpha = df$alpha, s = df$s, model = df$model, metric = method, n.test = df$n.test) }, error = function(e) { data.frame(val = NA, pval = NA, train.drug = df$train.drug, test.drug = df$test.drug, alpha = df$alpha, s = df$s, model = df$model, metric = "pearson", n.test = df$n.test) })
                   method <- "spearman"
-                  ct <- cor.test(df$predicted, df$actual, method = method)
-                  ret2 <- data.frame(val = ct$estimate, pval = ct$p.value, train.drug = df$train.drug, test.drug = df$test.drug, alpha = df$alpha, s = df$s, model = df$model, metric = method, n.test = df$n.test)
+##                  ct <- cor.test(df$predicted, df$actual, method = method)
+##                  ret2 <- data.frame(val = ct$estimate, pval = ct$p.value, train.drug = df$train.drug, test.drug = df$test.drug, alpha = df$alpha, s = df$s, model = df$model, metric = method, n.test = df$n.test)
+                  ret2 <- tryCatch({ ct <- cor.test(df$predicted, df$actual, method = method); data.frame(val = ct$estimate, pval = ct$p.value, train.drug = df$train.drug, test.drug = df$test.drug, alpha = df$alpha, s = df$s, model = df$model, metric = method, n.test = df$n.test) }, error = function(e) { data.frame(val = NA, pval = NA, train.drug = df$train.drug, test.drug = df$test.drug, alpha = df$alpha, s = df$s, model = df$model, metric = "spearman", n.test = df$n.test) })
                   mse <- mean((df$predicted-df$actual)^2)
                   ret3 <- data.frame(val = mse, pval = NA, train.drug = df$train.drug, test.drug = df$test.drug, alpha = df$alpha, s = df$s, model = df$model, metric = "mse", n.test = df$n.test)
                   ret <- rbind(ret, ret2, ret3)
@@ -2147,11 +2776,13 @@ extract.nested.results <- function(ret) {
 
                 if((class(df$predicted) != "logical") && !is.na(df$predicted)) {
                   method <- "pearson"
-                  ct <- cor.test(df$predicted, df$actual, method = method)
-                  ret <- data.frame(val = ct$estimate, pval = ct$p.value, train.drug = df$train.drug, test.drug = df$test.drug, alpha = df$alpha, s = df$s, model = df$model, metric = method, n.train = df$n.train, n.test = df$n.test)
+                  ## ct <- cor.test(df$predicted, df$actual, method = method)
+                  ## ret <- data.frame(val = ct$estimate, pval = ct$p.value, train.drug = df$train.drug, test.drug = df$test.drug, alpha = df$alpha, s = df$s, model = df$model, metric = method, n.train = df$n.train, n.test = df$n.test)
+                  ret <- tryCatch({ ct <- cor.test(df$predicted, df$actual, method = method); data.frame(val = ct$estimate, pval = ct$p.value, train.drug = df$train.drug, test.drug = df$test.drug, alpha = df$alpha, s = df$s, model = df$model, metric = method, n.test = df$n.test) }, error = function(e) { data.frame(val = NA, pval = NA, train.drug = df$train.drug, test.drug = df$test.drug, alpha = df$alpha, s = df$s, model = df$model, metric = "pearson", n.train = df$n.train, n.test = df$n.test) })
                   method <- "spearman"
-                  ct <- cor.test(df$predicted, df$actual, method = method)
-                  ret2 <- data.frame(val = ct$estimate, pval = ct$p.value, train.drug = df$train.drug, test.drug = df$test.drug, alpha = df$alpha, s = df$s, model = df$model, metric = method, n.train = df$n.train, n.test = df$n.test)
+                  ## ct <- cor.test(df$predicted, df$actual, method = method)
+                  ## ret2 <- data.frame(val = ct$estimate, pval = ct$p.value, train.drug = df$train.drug, test.drug = df$test.drug, alpha = df$alpha, s = df$s, model = df$model, metric = method, n.train = df$n.train, n.test = df$n.test)
+                  ret2 <- tryCatch({ ct <- cor.test(df$predicted, df$actual, method = method); data.frame(val = ct$estimate, pval = ct$p.value, train.drug = df$train.drug, test.drug = df$test.drug, alpha = df$alpha, s = df$s, model = df$model, metric = method, n.test = df$n.test) }, error = function(e) { data.frame(val = NA, pval = NA, train.drug = df$train.drug, test.drug = df$test.drug, alpha = df$alpha, s = df$s, model = df$model, metric = "spearman", n.train = df$n.train, n.test = df$n.test) })
                   mse <- mean((df$predicted-df$actual)^2)
                   ret3 <- data.frame(val = mse, pval = NA, train.drug = df$train.drug, test.drug = df$test.drug, alpha = df$alpha, s = df$s, model = df$model, metric = "mse", n.train = df$n.train, n.test = df$n.test)
                   ret <- rbind(ret, ret2, ret3)

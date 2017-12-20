@@ -392,34 +392,6 @@ do.combat <- function(all.expr, batch, postfix) {
   list("all.expr.combat" = all.expr.combat, "pca" = all.pca, "combat.pca" = all.combat.pca)
 }
 
-
-varplot = function(pca, Main=NULL, cols = "slategrey")
-{
-  pcaSum = summary(pca)$importance; 
-  ## make the axes square and have the same range
-  par(pty="s")
-  xlim <- c(min(pca$x[,1], pca$x[,2]) - 0.1 * abs(min(pca$x[,1], pca$x[,2])), max(pca$x[,1], pca$x[,2]) + 0.1 * abs(max(pca$x[,1], pca$x[,2])))
-  ylim <- xlim
-  library(scales)
-##  plot(pca$x[,1], pca$x[,2], xlab = paste("PC1", signif(pcaSum[2,1],3)),ylab = paste("PC2", signif(pcaSum[2,2],3)), pch=16, col = alpha(cols, 0.5), cex = .65, main=Main,
-##       xlim = xlim, ylim = ylim)
-  df <- data.frame(x = pca$x[,1], y = pca$x[,2], col = cols)
-  g <- ggplot(data = df, aes(x = x, y = y, fill = col, colour = col))
-  g <- g + geom_point(alpha = 0.6)
-##  g <- g + geom_point(alpha = 0.2, shape = 21)
-  g <- g + xlab(paste("PC1", signif(pcaSum[2,1],3)))
-  g <- g + ylab(paste("PC2", signif(pcaSum[2,2],3)))
-  g <- g + xlim(xlim)
-  g <- g + ylim(ylim)
-  g
-}
-
-varplot2 = function(pca, Main=NULL, cols = "slategrey")
-{
-  pcaSum = summary(pca)$importance; 
-  plot(pca$x[,1], pca$x[,3], xlab = paste("PC1", signif(pcaSum[2,1],3)),ylab = paste("PC3", signif(pcaSum[2,3],3)), pch=16, col =cols,cex = .65, main=Main)
-}
-
 plot.correction <- function() {
 
   tmp <- all.expr.combat

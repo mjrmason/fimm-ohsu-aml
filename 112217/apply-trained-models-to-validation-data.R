@@ -21,6 +21,7 @@ suppressPackageStartupMessages(library(ggbeeswarm))
 suppressPackageStartupMessages(library(plyr))
 suppressPackageStartupMessages(library(stringr))
 suppressPackageStartupMessages(library(synapseClient))
+suppressPackageStartupMessages(library(mygene))
 
 suppressPackageStartupMessages(library("GSVA"))
 # use GSA to read in a gmt file
@@ -30,6 +31,7 @@ suppressPackageStartupMessages(library("GSA"))
 source("../common/data-preprocessing.R")
 source("../common/models.R")
 source("../common/plotting.R")
+source("../common/utils.R")
 
 ## Register parallelization
 num.cores <- detectCores()
@@ -45,68 +47,11 @@ synapseLogin()
 
 ## Begin setup (this will need to be changed as the data sets in the intersection change)
 
-## Purpose:
-## This file models 2 data sets (OHSU and FIMM)
-
-## Data sets to be analyzed:
-data.sets <- c("ohsu", "fimm")
-data.sets.to.analyze <- data.sets
-
-## The drug mapping file lists the drugs in common across all data sets with the drug.map.drug.id.cols
-## providing the identifier for each drug for each respective data set.
-## The drug mapping file may be created by a script such as 
-## harmonize-fimm-ohsu-compounds.R
-drug.mapping.synId <- "syn11361110" ## fimm-ohsu-drug-map.tsv
-drug.map.drug.id.cols <- c("OHSU_DRUG_NAME", "FIMM_Batch_ID_Drug")
-names(drug.map.drug.id.cols) <- data.sets
-
-## The column name within the drug map file that will be used to identify drugs (across all data sets)
-drug.name.col <- "FIMM_DRUG_NAME"
-
-## These fit files are assumed to be for AUCs/DSS values calculated across shared concentration ranges across data sets.
-## These files may be created by a script such as
-## calculate-dss-fimm-ohsu.R
-data.set.dss.fit.synIds <- c("syn11362885", "syn11362891")
-names(data.set.dss.fit.synIds) <- data.sets
-data.set.dss.fit.files <- c("ohsu-fimm-ohsu-outlier1-dss-t0.tsv", "fimm-fimm-ohsu-outlier1-dss-t0.tsv")
-
-## Batch-corrected log2 cpm (or rma) expression files (NB: these exclude 2 outliers in OHSU)
-## These files may be created by a script such as
-## normalize-fimm-ohsu-expression-distributions.R
-## Batch-corrected log2 cpm (or rma) expression files (NB: these exclude 2 outliers in OHSU)
-data.set.expr.synIds <- c("syn11362256", "syn11362257")
-names(data.set.expr.synIds) <- data.sets
-data.set.expr.files <- c("ohsu-expr-fimm-ohsu-outlier1-combat.tsv", "fimm-expr-fimm-ohsu-outlier1-combat.tsv")
-
-## The columns within each respective data set that identifies the drug (in the name space of that data set)
-data.set.drug.id.cols <- list("ohsu" = "inhibitor", "fimm" = "DRUG_ID")
-
-## The columns within each respective data set that identifies a screen (i.e., a particular replicate of a patient/cell line x drug)
-screen.id.cols <- list("ohsu" = c("patient_id", "inhibitor", "lab_id", "SeqID", "replicant", "time_of_read"),
-                       "fimm" = c("SCREEN_ID", "PATIENT_ID", "DRUG_ID"))
-
-## The columns within each respective data set that identifies the patient/cell line/specimen in the drug fit files.
-## These patients should match the patient identifiers/columns of the expression data.
-## NB: in some cases, these columns may not exist in the drug fit files, but need to be merged in.
-## In particular, "SeqID" (the identifier used in sequencing experiments) may not be included in the OHSU drug fit files.
-## Instead, patients are identified by "lab_id"'s in the drug fit file.  Below, we merge the OHSU metadata/sample
-## summary information that maps lab_id's to SeqID's.
-patient.id.cols <- list("ohsu" = "SeqID", "fimm" = "SCREEN_ID")
-
-## The columns within the drug fit files that are effectively annotations and are not dependent on the fit [e.g., using
-## a 4-parameter logistic L.4 or 4-parameter log logistic LL.4 fit].
-merge.cols <- list(
-  "ohsu" = c(screen.id.cols[["ohsu"]], "min.conc", "max.conc", "all.concs.nM", "uniq.concs.nM"),
-  "fimm" = c(screen.id.cols[["fimm"]], "min.conc", "max.conc", "all.concs.nM", "uniq.concs.nM"))
-
-## Pull in the CTRP cell line metadata so we can see the cancer/histology type of each sample
-synId <- "syn5632192"
-obj <- synGet(synId, downloadFile = TRUE)
-ctrp.cell.line.metadata <- read.table(getFileLocation(obj), sep="\t", header=TRUE, as.is=TRUE, comment.char="", quote="")
+source("fimm-ohsu-setup-112217.R")
+rdata.file <- ".Rdata.validate.112217"
 
 ## A string that will be included in any output files.
-## Here "foc-aml-s-aml" = "fimm-ohsu-ctrp-aml-s-aml"
-file.prefix <- "fimm-ohsu-outlier-ds"
+file.prefix <- "fimm-ohsu-validate-trained-models-112217"
 
 ## End setup
 
@@ -149,6 +94,18 @@ for(ds in names(fits)) {
     })
 }
 
+## Drop any fits that are flagged as outliers
+fct.postfixes <- list("LL.4" = ".ll4", "L.4" = ".l4")
+fct <- "LL.4"
+for(ds in names(fits)) {
+    exclude.cols <- colnames(fits[[ds]])[grepl(pattern=paste0("exclude", fct.postfixes[[fct]]), x=colnames(fits[[ds]]))]
+    any.excluded <- unlist(apply(fits[[ds]][, exclude.cols], 1, function(row) any(row)))
+    orig.nrow <- nrow(fits[[ds]])
+    fits[[ds]] <- fits[[ds]][!any.excluded, ]
+    new.nrow <- nrow(fits[[ds]])
+    cat(paste0(ds, ": filtered ", orig.nrow - new.nrow, " of the original ", orig.nrow, " fits.\n"))
+}
+
 ## Load the map of drugs between data sets
 obj <- synGet(drug.mapping.synId, downloadFile = TRUE)
 drug.map <- read.table(getFileLocation(obj), sep="\t", header=TRUE, quote="\"", comment.char="")
@@ -162,9 +119,8 @@ for(col in drug.map.drug.id.cols) {
 
 ## Restrict the fits to those drugs in common across the data sets -- do so by merging.
 cat("Restricting fits to those involving common drugs\n")
-for(i in 1:length(fits)) {
-  ds <- names(fits)[i]
-  fits[[ds]] <- merge(fits[[ds]], drug.map, by.x = data.set.drug.id.cols[[ds]], by.y = drug.map.drug.id.cols[i], all = FALSE)
+for(ds in names(fits)) {
+  fits[[ds]] <- merge(fits[[ds]], drug.map, by.x = data.set.drug.id.cols[[ds]], by.y = drug.map.drug.id.cols[[ds]], all = FALSE)
 }
 
 common.drugs <- Reduce("intersect", lapply(fits, function(fit) unique(fit[, drug.name.col])))
@@ -184,6 +140,7 @@ for(i in 1:length(fits)) {
 }
 
 ## Load in the expr files
+cat("Reading expression data sets\n")
 exprs <- llply(data.set.expr.synIds, .parallel = FALSE,
               .fun = function(synId) {
                        obj <- synGet(synId, downloadFile = TRUE)
@@ -277,6 +234,9 @@ load(getFileLocation(synGet(synId)))
 synId <- "syn10644520"
 load(getFileLocation(synGet(synId)))
 
+all.gene.sets <- c(hallmark.gene.sets, kegg.gene.sets, biocarta.gene.sets, reactome.gene.sets)
+ensg.to.gene.sets <- invert.list(all.gene.sets)
+
 ## BEGIN modeling setup
 
 ## Do analysis at pathway- (hallmark, biocarta, kegg, and reactome) as well as at gene-level
@@ -285,15 +245,32 @@ load(getFileLocation(synGet(synId)))
 gene.sets <- list("gene" = "gene")
 
 ## Filter the gene expression data to restrict to highly-expressed genes
+## We have already filtered before getting here.
+expr.filt.matrices <- exprs
+if(FALSE) {
 expr.filt.matrices <- list()
 for(ds in names(exprs)) {
   iqrs <- unlist(apply(exprs[[ds]], 1, IQR))
   expr.filt.matrices[[ds]] <- exprs[[ds]][iqrs > median(iqrs[iqrs > 0]),]
 }
+}
 
 study.genes <- (lapply(exprs, rownames))
 study.filt.genes <- (lapply(expr.filt.matrices, rownames))
 common.genes <- Reduce(intersect, study.filt.genes)
+
+baz <- queryMany(common.genes, scopes="ensembl.gene", fields=c("symbol","go"), species="human")
+indices <- 1:nrow(baz)
+names(indices) <- baz$query
+ensg.to.go.gene.sets <- llply(indices, 
+                      .fun = function(indx) {
+                               unlist(llply(c("go.BP", "go.CC", "go.MF"), .fun = function(col) unlist(lapply(baz[indx,col], function(df) df$term))))
+                             })
+go.gene.sets <- invert.list(ensg.to.go.gene.sets)
+baz <- baz[!is.na(baz$symbol),]
+ensg.to.symbols <- as.list(baz$symbol)
+names(ensg.to.symbols) <- baz$query
+
 
 ## END modeling setup
 
@@ -350,7 +327,7 @@ if(ds %in% data.sets.to.analyze) {
   train.common.drugs[[nxt.indx]] <- common.drugs.by.data.set[[ds]]
   train.drugs[[nxt.indx]] <- common.drugs.by.data.set[[ds]]
   train.drug.cols[[nxt.indx]] <- drug.name.col
-  train.patient.cols[[nxt.indx]] <- patient.id.cols[[ds]]
+  train.patient.cols[[nxt.indx]] <- expr.patient.id.cols[[ds]]
   train.response.cols[[nxt.indx]] <- "dss.auc.ll4"
 
   nxt.indx <- length(test.set.names) + 1
@@ -361,7 +338,7 @@ if(ds %in% data.sets.to.analyze) {
   test.clinical.args[nxt.indx] <- list(NULL)
   test.common.drugs[[nxt.indx]] <- common.drugs.by.data.set[[ds]]
   test.drug.cols[[nxt.indx]] <- drug.name.col
-  test.patient.cols[[nxt.indx]] <- patient.id.cols[[ds]]
+  test.patient.cols[[nxt.indx]] <- expr.patient.id.cols[[ds]]
   test.response.cols[[nxt.indx]] <- "dss.auc.ll4"
 
   rm(ohsu.dss.orig.train)
@@ -379,7 +356,7 @@ if(ds %in% data.sets.to.analyze) {
   test.clinical.args[nxt.indx] <- list(NULL)
   test.common.drugs[[nxt.indx]] <- common.drugs.by.data.set[[ds]]
   test.drug.cols[[nxt.indx]] <- drug.name.col
-  test.patient.cols[[nxt.indx]] <- patient.id.cols[[ds]]
+  test.patient.cols[[nxt.indx]] <- expr.patient.id.cols[[ds]]
   test.response.cols[[nxt.indx]] <- "dss.auc.ll4"
 } ## if("fimm" %in% data.sets.to.analyze) 
 
@@ -395,7 +372,7 @@ if(ds %in% data.sets.to.analyze) {
   train.common.drugs[[nxt.indx]] <- common.drugs.by.data.set[[ds]]
   train.drugs[[nxt.indx]] <- common.drugs.by.data.set[[ds]]
   train.drug.cols[[nxt.indx]] <- drug.name.col
-  train.patient.cols[[nxt.indx]] <- patient.id.cols[[ds]]
+  train.patient.cols[[nxt.indx]] <- expr.patient.id.cols[[ds]]
   train.response.cols[[nxt.indx]] <- "dss.auc.ll4"
 
 } ## if("ctrp" %in% data.sets.to.analyze) 
@@ -411,7 +388,7 @@ if(ds %in% data.sets.to.analyze) {
   test.clinical.args[nxt.indx] <- list(NULL)
   test.common.drugs[[nxt.indx]] <- common.drugs.by.data.set[[ds]]
   test.drug.cols[[nxt.indx]] <- drug.name.col
-  test.patient.cols[[nxt.indx]] <- patient.id.cols[[ds]]
+  test.patient.cols[[nxt.indx]] <- expr.patient.id.cols[[ds]]
   test.response.cols[[nxt.indx]] <- "dss.auc.ll4"
 } ## if("ntap" %in% data.sets.to.analyze) 
 
@@ -426,7 +403,7 @@ if(ds %in% data.sets.to.analyze) {
   test.clinical.args[nxt.indx] <- list(NULL)
   test.common.drugs[[nxt.indx]] <- common.drugs.by.data.set[[ds]]
   test.drug.cols[[nxt.indx]] <- drug.name.col
-  test.patient.cols[[nxt.indx]] <- patient.id.cols[[ds]]
+  test.patient.cols[[nxt.indx]] <- expr.patient.id.cols[[ds]]
   test.response.cols[[nxt.indx]] <- "dss.auc.ll4"
 } ## if("sanger" %in% data.sets.to.analyze) 
 
@@ -501,8 +478,6 @@ num.train.samples.per.drug[, min.cnt.col] <- unlist(apply(num.train.samples.per.
 cnt.cols <- grepl(colnames(num.test.samples.per.drug), pattern="test.num.samples")
 num.test.samples.per.drug[, min.cnt.col] <- unlist(apply(num.test.samples.per.drug[, cnt.cols, drop=FALSE], 1, min))
 
-save.image(".Rdata.model.fimm.ohsu")
-
 ## BEGIN modeling
 
 cat("Training and testing with AUC\n")
@@ -537,11 +512,11 @@ if(do.downsampling) {
                                          train.response.cols = train.response.cols, test.set.names = test.set.names, test.dss.args = test.dss.args, test.expr.args = test.expr.args, 
                                          test.genomic.args = test.genomic.args, test.clinical.args = test.clinical.args, test.common.drugs = test.common.drugs,
                                          test.drug.cols = test.drug.cols, test.patient.cols = test.patient.cols, test.response.cols = test.response.cols, 
-                                         seed = 1234, use.rf = FALSE, use.svm = FALSE, use.mean = FALSE, num.processes = num.processes)
+                                         seed = 1234, use.rf = FALSE, use.svm = FALSE, use.mean = FALSE, num.processes = num.processes, alphas = c(0, 1))
 }
 cat("Done training and testing with AUC\n")
 
-## save.image(".Rdata.model.fimm.ohsu")
+save.image(rdata.file)
 
 do.shifted.auc <- FALSE
 if(do.shifted.auc) {
@@ -559,7 +534,7 @@ if(do.shifted.auc) {
                                          num.iterations = 100, with.replacement = FALSE, return.fits = FALSE) 
   cat("Done training and testing with shifted AUC\n")
 
-  save.image(".Rdata.model.fimm.ohsu")
+  save.image(rdata.file)
 }
 
 ## Sanitize the above results list into a table that has columns for 
@@ -577,6 +552,10 @@ tbl.full <- ldply(train.set.names,
                                                     tmp.auc$test.set <- test.set
                                                     tmp.auc$gene.set <- gene.set
                                                     tmp.auc$response <- "AUC"
+
+                                                    tmp.features <- extract.features(res.auc[["all.fits"]][[train.set]][[gene.set]], s = "lambda.min")
+                                                    tmp.auc <- merge(tmp.auc, tmp.features, all.x = TRUE, all.y = FALSE)
+
                                                     if(do.shifted.auc) {
                                                       tmp.shifted.auc <- extract.results(res.shifted.auc[["all.comparisons"]][[train.set]][[test.set]][[gene.set]])
                                                       tmp.shifted.auc$train.set <- train.set
@@ -591,7 +570,7 @@ tbl.full <- ldply(train.set.names,
                     })
 
 cat("Extracted results\n")
-save.image(".Rdata.model.fimm.ohsu")
+save.image(rdata.file)
 
 ## Create a table that summarizes downsamplings by taking the entry corresponding to the median correlation.
 if(do.downsampling) { 
@@ -682,7 +661,7 @@ for(resp in unique(tbl$response)) {
 ##  do.call("grid.arrange", glist)
 }
 
-save.image(".Rdata.model.fimm.ohsu")
+save.image(rdata.file)
 
 ## Make volcano plots of correlations (model prediction of drug response vs actual drug response) faceted by
 ## training/test data set and type of feature (gene, biocart, hallmark, kegg, and reactome).
@@ -726,6 +705,47 @@ for(resp in unique(tbl$response)) {
 ##  do.call("grid.arrange", glist)
 }
 
+annotate.table <- function(tbl, map, from.col, to.col, do.sort = FALSE) {
+  tbl[, to.col] <- unlist(llply(tbl[, from.col], .parallel = FALSE,
+                                .fun = function(key.str) {
+                                         keys <- unlist(strsplit(key.str, split=",[ ]*"))
+                                         values <- unlist(lapply(keys, function(key) map[[key]]))
+                                         values <- unique(values)
+                                         values <- values[!is.null(values)]
+                                         if(do.sort) { values <- sort(values) }
+                                         paste(values, collapse=", ")
+                                }))
+  tbl
+}
+
+annotate.table.sig.overlap <- function(tbl, gene.sets, from.col, to.col, universe, do.sort = FALSE) {
+  tbl[, to.col] <- unlist(llply(tbl[, from.col], .parallel = FALSE,
+                                .fun = function(key.str) {
+                                         keys <- unlist(strsplit(key.str, split=",[ ]*"))
+                                         genes1 <- intersect(keys, universe)
+                                         pvals <- llply(gene.sets, .parallel = FALSE,
+                                                      .fun = function(gene.set) {
+                                                               genes2 <- intersect(gene.set, universe)
+                                                               both <- intersect(genes1, genes2)
+                                                               n.both <- length(both)
+                                                               n.1 <- length(setdiff(genes1, genes2))
+                                                               n.2 <- length(setdiff(genes2, genes1))
+                                                               n.neither <- length(setdiff(universe, union(genes1, genes2)))
+                                                               mat <- cbind(c(n.both, n.1), c(n.2, n.neither))
+                                                               fet <- fisher.test(mat, alternative = "greater")
+                                                               pval <- fet$p.value
+                                                               pval
+                                                      })   
+                                         pvals <- unlist(pvals)
+                                         qvals <- p.adjust(pvals, method = "BH")
+                                         values <- names(gene.sets)[!is.na(qvals) & (qvals < .20)]
+                                         if(do.sort) { values <- sort(values) }
+                                         paste(values, collapse=", ")
+                                }))
+  tbl
+}
+
+
 ## For a given training set, output all drugs that are positive correlated across all test sets
 for(resp in unique(tbl$response)) {
   for(met in c("pearson", "spearman")) {
@@ -735,7 +755,7 @@ for(resp in unique(tbl$response)) {
           sub <- subset(tbl, metric == met & model == mdl & response == resp & gene.set == gs & train.set == tr.set)
           base.tr.set <- gsub(x = tr.set, pattern = ".train", replacement = "")
           base.tr.set <- gsub(x = base.tr.set, pattern = ".train", replacement = "")
-          ## sub <- merge(sub, drug.map, by.x = "train.drug", by.y = drug.map.drug.id.cols[names(drug.map.drug.id.cols)==base.tr.set], all.x = TRUE)
+          ## sub <- merge(sub, drug.map, by.x = "train.drug", by.y = drug.map.drug.id.cols[[base.tr.set]], all.x = TRUE)
           test.sets <- unique(sub$test.set)
           names(test.sets) <- test.sets
           test.tbls <- llply(test.sets,
@@ -747,7 +767,8 @@ for(resp in unique(tbl$response)) {
             colnames(test.tbls[[ts]])[grepl(colnames(test.tbls[[ts]]), pattern="pval")] <- paste0(ts, ".pval")
             colnames(test.tbls[[ts]])[grepl(colnames(test.tbls[[ts]]), pattern="^val$")] <- paste0(ts, ".val")
           }
-          test.tbl <- Reduce(function(...) merge(..., all = FALSE, by = "train.drug"), test.tbls)
+          test.tbl <- Reduce(function(...) merge(..., all = FALSE, by = c("train.drug", "train.set", "features", "alpha", "model", "gene.set", "s", "metric", "response", "test.drug", "n.train")), test.tbls)
+##          test.tbl <- Reduce(function(...) merge(..., all = FALSE), test.tbls)
           test.tbl <- merge(test.tbl, drug.map[ ,!grepl(pattern="conc", colnames(drug.map), ignore.case=TRUE)], by.x = "train.drug", by.y = drug.name.col, all.x = TRUE)
           pval.cols <- grepl(colnames(test.tbl), pattern="pval")
           val.cols <- grepl(colnames(test.tbl), pattern="\\.val")
@@ -757,7 +778,21 @@ for(resp in unique(tbl$response)) {
                                   unlist(apply(test.tbl[, val.cols], 1, function(row) all(row > 0)))
           none.sig.flag <- unlist(apply(test.tbl[, pval.cols], 1, function(row) all(row > 0.05)))
           file <- paste0(file.prefix, "-", resp, "-", mdl, "-", met, "-vs-gene-sets-all-pos-and-sig.xls")
-          write.table(file = file, test.tbl[all.pos.and.sig.flag, ], row.names = FALSE, col.names = TRUE, quote = FALSE, sep = "\t")
+          sig.tbl <- test.tbl[all.pos.and.sig.flag,,drop=FALSE ]
+          ## Annotate lasso results
+          if(mdl == "lasso-foo") {
+             ## features column has comma separated list of ensembl ids
+             sig.tbl <- annotate.table(sig.tbl, ensg.to.gene.sets, "features", "pathways", do.sort = TRUE)
+             universe <- intersect(common.genes, names(ensg.to.gene.sets))
+             sig.tbl <- annotate.table.sig.overlap(sig.tbl, all.gene.sets, "features", "sig.pathways", universe = universe, do.sort = TRUE)
+             sig.tbl <- annotate.table(sig.tbl, ensg.to.go.gene.sets, "features", "go", do.sort = TRUE)
+             universe <- intersect(common.genes, names(ensg.to.go.gene.sets))
+             sig.tbl <- annotate.table.sig.overlap(sig.tbl, go.gene.sets, "features", "sig.go", universe = universe, do.sort = TRUE)
+             sig.tbl <- annotate.table(sig.tbl, ensg.to.symbols, "features", "symbol", do.sort = TRUE)
+             sig.tbl <- sig.tbl[, c("test.drug", "ohsu.test.val", "ohsu.test.pval", "fimm.val", "fimm.pval", "Mechanism.Targets", "Gene.Targets", "Class.explained", "symbol", "pathways", "sig.pathways", "go", "sig.go", "features")]
+          }
+cat(paste0("writing ", file, "\n"))
+          write.table(file = file, sig.tbl, row.names = FALSE, col.names = TRUE, quote = FALSE, sep = "\t")
           file <- paste0(file.prefix, "-", resp, "-", mdl, "-", met, "-vs-gene-sets-none-sig.xls")
           write.table(file = file, test.tbl[none.sig.flag, ], row.names = FALSE, col.names = TRUE, quote = FALSE, sep = "\t")
         }
@@ -768,116 +803,17 @@ for(resp in unique(tbl$response)) {
 
 cat("Created volcano plots\n")
 
-save.image(".Rdata.model.fimm.ohsu")
+save.image(rdata.file)
 cat("Successfully exiting\n")
-q()
+q(status = 0)
 
-panel.diff <- function (x, y, col = par("col"), bg = NA, pch = par("pch"), 
-                              cex = 1, col.regres = "red", ...) 
-{ 
-  ok <- is.finite(x) & is.finite(y) 
-print(x-y)
-vec <- x - y
-  points(1:length(vec), vec, pch = pch, col = col, bg = bg, cex = cex) 
-##  abline(h = 0, col = col.regres, ...) 
-} 
 
-save.image(".Rdata.model.fimm.ohsu")
-
-if(length(unique(tbl$train.set)) > 1) { 
-## Create pairwise correlation plots
-for(test.set.name in unique(tbl$test.set)) {
-  for(mdl in c("lasso", "ridge")) {
-    for(resp in unique(tbl$response)) {
-      pdf(paste(file.prefix, test.set.name, mdl, resp, "corr.pdf", sep="-"))
-      mets <- c("pearson", "spearman")
-      for(met in mets[mets %in% tbl$metric]) {
-        for(gs in unique(tbl$gene.set)) {
-          mat <- do.call("cbind", corr.lists[[test.set.name]][[mdl]][[resp]][[met]][[gs]])
-          cols <- NULL
-          if("Class.explained" %in% colnames(drug.name.tbl)) {
-            cls <- drug.name.tbl$Class.explained
-            names(cls) <- drug.name.tbl[, drug.name.col]
-            cols <- factor(cls[names(corr.lists[[test.set.name]][[mdl]][[resp]][[met]][[gs]][[1]])])
-          }
-##        pdf(paste(test.set.name, mdl, resp, gs, "corr.pdf", sep="-"))
-          pairs(mat, lower.panel=panel.regression, upper.panel=panel.cor, main = paste(test.set.name, mdl, resp, met, gs, sep=" "), col = cols, oma=c(4,4,6,12))
-          par(xpd=TRUE)
-          legend(0.85, 0.7, legend = levels(cols), fill = c(1:length(levels(cols))), cex = 0.7)
-##        d <- dev.off()
-        }
-      }
-      d <- dev.off()
-    }
-  }
+get.coef <- function(fit, s) {
+  cf <- coefficients(fit, s = s)
+  cf <- as.matrix(cf)
+  cf[cf[,1] != 0, ]
 }
 
-for(test.set.name in unique(tbl$test.set)) {
-  for(mdl in c("lasso", "ridge")) {
-    for(resp in unique(tbl$response)) {
-      pdf(paste(file.prefix, test.set.name, mdl, resp, "diff.pdf", sep="-"))
-      mets <- c("pearson", "spearman")
-      for(met in mets[mets %in% tbl$metric]) {
-        for(gs in unique(tbl$gene.set)) {
-          mat <- do.call("cbind", corr.lists[[test.set.name]][[mdl]][[resp]][[met]][[gs]])
-          cols <- NULL
-          if("Class.explained" %in% colnames(drug.name.tbl)) {
-            cls <- drug.name.tbl$Class.explained
-            names(cls) <- drug.name.tbl[, drug.name.col]
-            cols <- factor(cls[names(corr.lists[[test.set.name]][[mdl]][[resp]][[met]][[gs]][[1]])])
-          }
-          len <- length(corr.lists[[test.set.name]][[mdl]][[resp]][[met]][[gs]])
-          glist <- list()
-          for(i in 1:len) {
-            for(j in 1:len) {
-              g <- NULL
-              if(i != j) {
-                x <- y <- NULL
-                if(i > j) {
-                  x <- corr.lists[[test.set.name]][[mdl]][[resp]][[met]][[gs]][[i]]
-                  y <- corr.lists[[test.set.name]][[mdl]][[resp]][[met]][[gs]][[j]]
-                  df <- data.frame(x = x, y = y, col = cols)
-                } else {
-                  x <- corr.lists[[test.set.name]][[mdl]][[resp]][[met]][[gs]][[j]]
-                  y <- corr.lists[[test.set.name]][[mdl]][[resp]][[met]][[gs]][[i]]
-                  df <- data.frame(x = 1:length(x), y = x - y, col = cols)
-                }
-                if(i < j) { g <- ggplot(df, aes(x = x, y = y, colour = col)) } else { g <- ggplot(df, aes(x = x, y = y)) }
-                g <- g + geom_point()
-                g <- g + theme(legend.position="none")
-                if(i < j) {
-                  g <- g + geom_hline(yintercept = 0)
-                } else {
-                  g <- g + geom_smooth(method='lm')
-                  lims <- c(min(min(df$x, na.rm=TRUE), min(df$y, na.rm=TRUE)), max(max(df$x, na.rm=TRUE), max(df$y, na.rm=TRUE)))
-                  g <- g + ggtitle(lm_eqn_bq(df))
-                  g <- g + geom_abline(intercept = 0, slope = 1, linetype="dashed")
-                  ## g <- g + geom_text(x = lims[1] + 0.2, y = lims[1] + 0.1, label = lm_eqn(df), parse=TRUE)
-                }
-              } else {
-                g <- ggplot() + annotation_custom(textGrob(names(corr.lists[[test.set.name]][[mdl]][[resp]][[met]][[gs]])[i]),
-                                 xmin = -Inf, xmax = Inf, ymin = -Inf, ymax = Inf) 
-              }
-              g <- g + xlab("") + ylab("")
-              if(i < j) {
-                g <- g + ylab(paste0(names(corr.lists[[test.set.name]][[mdl]][[resp]][[met]][[gs]])[j], " - ", names(corr.lists[[test.set.name]][[mdl]][[resp]][[met]][[gs]])[i]))
-              }
-              if(i > j) {
-                g <- g + xlab(names(corr.lists[[test.set.name]][[mdl]][[resp]][[met]][[gs]])[i])
-                g <- g + ylab(names(corr.lists[[test.set.name]][[mdl]][[resp]][[met]][[gs]])[j])
-              }
-  
-              glist[[length(glist)+1]] <- g
-            }
-          }
-          do.call("grid.arrange", c(glist, "top" = paste(test.set.name, mdl, resp, met, gs, sep=" ")))
-        }
-      }
-      d <- dev.off()
-    }
-  }
-}
+foo <- extract.predicted.actual(res.auc[["all.comparisons"]][["ohsu.train"]][["fimm"]][["gene"]], train.drug = "PD184352", alpha = 1, model = "glmnet", s = "lambda.min")
+foo <- extract.fit(res.auc[["all.fits"]][["ohsu.train"]][["gene"]], train.drug = "PD184352", alpha = 1, model = "glmnet")[[79]][[2]]
 
-} ## if(length(unique(tbl$train.set)) > 1) 
-
-stop("successfully completed")

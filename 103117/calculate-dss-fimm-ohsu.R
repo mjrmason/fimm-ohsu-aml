@@ -38,6 +38,7 @@ drug.mapping.synId <- "syn11361110" ## fimm-ohsu-drug-map.tsv
 drug.map.drug.id.cols <- c("OHSU_DRUG_NAME", "FIMM_Batch_ID_Drug")
 names(drug.map.drug.id.cols) <- data.sets
 
+## These were created by the script 070617/fit-ohsu-and-fimm-drug-response-data.R
 data.set.drug.fit.synIds <- c("syn10083494", "syn10083488")
 names(data.set.drug.fit.synIds) <- data.sets
 data.set.drug.fit.files <- c("ohsu.dss.t0.tsv", "fimm.dss.t0.tsv")

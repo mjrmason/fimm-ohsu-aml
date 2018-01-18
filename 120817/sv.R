@@ -1,67 +1,3 @@
-initialize <- TRUE
-
-load(".Rdata.overlap.120817")
-
-if(initialize) {
-suppressPackageStartupMessages(library(glmnet))
-suppressPackageStartupMessages(library("randomForest"))
-suppressPackageStartupMessages(library("e1071"))
-suppressPackageStartupMessages(library("foreach"))
-suppressPackageStartupMessages(library("parallel"))
-suppressPackageStartupMessages(library(openxlsx))
-suppressPackageStartupMessages(library(tidyr))
-
-suppressPackageStartupMessages(library("minpack.lm"))
-suppressPackageStartupMessages(library("ggplot2"))
-suppressPackageStartupMessages(library("gridExtra"))
-suppressPackageStartupMessages(library("caTools"))
-suppressPackageStartupMessages(library("data.table"))
-suppressPackageStartupMessages(library("pcaMethods"))
-suppressPackageStartupMessages(library("VennDiagram"))
-suppressPackageStartupMessages(library("caret"))
-
-suppressPackageStartupMessages(library(ggbeeswarm))
-suppressPackageStartupMessages(library(plyr))
-suppressPackageStartupMessages(library(stringr))
-suppressPackageStartupMessages(library(synapseClient))
-
-suppressPackageStartupMessages(library("GSVA"))
-# use GSA to read in a gmt file
-suppressPackageStartupMessages(library("GSA"))
-
-suppressPackageStartupMessages(library(mygene))
-suppressPackageStartupMessages(library(gplots))
-
-## Bring in common code
-source("../common/data-preprocessing.R")
-source("../common/models.R")
-source("../common/plotting.R")
-source("../common/utils.R")
-
-## Register parallelization
-num.cores <- detectCores()
-if(!is.na(num.cores) && (num.cores > 1)) {
-  suppressPackageStartupMessages(library("doMC"))
-  cat(paste("Registering ", num.cores-1, " cores.\n", sep=""))
-  registerDoMC(cores=(num.cores-1))
-}
-num.processes <- num.cores - 1
-
-## Log in to Synapse
-synapseLogin()
-
-## Begin setup (this will need to be changed as the data sets in the intersection change)
-
-## Purpose:
-## This file models 2 data sets (OHSU and FIMM)
-source("fimm-ohsu-setup-120817.R")
-} # end initialize
-
-
-## ensg.to.pathway.list <- list()
-
-cat("Beginning\n")
-print(names(ensg.to.pathway.list))
 gsets <- unique(trn.tbl$gene.set)
 ## gsets <- gsets[gsets != "gene"]
 gsets <- c("biocarta")
@@ -71,65 +7,35 @@ gsets <- c("gene")
 gsets <- c("kegg")
 gsets <- unique(as.character(trn.tbl$gene.set))
 gsets <- c("gene", gsets[gsets != "gene"])
-## gsets <- c("gene")
 max.deviance.df <- c()
 for(gset in gsets) {
-  cat(paste0("Doing gset: ", gset, "\n"))
   tbl.gset <- subset(trn.tbl, gene.set == gset)
   models <-  unique(as.character(tbl.gset$model))
 ##  models <- c("rf")
-  models <- c("ridge", "rf", models[!(models %in% c("ridge", "rf"))])
-  models <- c("ridge", models[!(models %in% c("ridge", "rf"))])
-##  models <- c("ridge")
-##  models <- c("rf")
+  models <- c("rf", models[models != "rf"])
   for(mdl in models) {
-    cat(paste0("Doing model: ", mdl, "\n"))
     tbl.model <- subset(tbl.gset, model == mdl)
     responses <- unique(as.character(tbl.model$pt.response))
 ##    responses <- "no.transform"
-    responses <- c("random", "mean.feature", "no.transform", "model.mean.feature", responses[!(responses %in% c("mean.feature", "random", "no.transform", "model.mean.feature"))])
-##    responses <- c("random", "mean.feature")
-
-
-    expected.fracs <- list()
-    if(gset == "gene") {
-      pthwys <- names(ensg.to.pathway.list)
-      if(length(pthwys) > 0) {
-      for(gs.nm in pthwys[pthwys %in% c("go.BP", "kegg")]) {
-        cat(paste0("Doing gs.nm: ", gs.nm, "\n"))
-        universe <- universes[[gset]]
-print(names(ensg.to.pathway.list))
-print(head(universe))
-print(length(universe[!grepl(pattern="mean", universe)]))
-print(head(names(ensg.to.pathway.list[[gs.nm]])))
-        mx <- max(length(universe[!grepl(pattern="mean", universe)]), length(names(ensg.to.pathway.list[[gs.nm]])))
-print(mx)
-        list.sizes <- c(seq(from=5,to=100, by=5), seq(from=100, to=500, by=10), seq(from=500, to=1000, by=25))
-        list.sizes <- list.sizes[list.sizes <= mx]
-        list.sizes <- list.sizes[list.sizes > 0]
-        list.sizes <- unique(sort(list.sizes))
-        names(list.sizes) <- list.sizes
-print(head(list.sizes))
-
-cat(paste0("Calculating expected overlap for ", gs.nm, " and ", mdl, "\n"))
-      expected.fracs[[gs.nm]] <- llply(list.sizes, .parallel = TRUE,
-                           .fun = function(sz) {
-        switch(mdl,
-          "rf" = { calc.expected.overlap.of.pathways(universe = universe, transform = "none", top = sz, pathway.set = ensg.to.pathway.list[[gs.nm]]) },
-          "lasso" = { calc.expected.overlap.of.pathways(universe = universe, transform = "abs.drop.zero", top = sz, pathway.set = ensg.to.pathway.list[[gs.nm]]) },
-          "ridge" = { calc.expected.overlap.of.pathways(universe = universe, transform = "abs.drop.zero", top = sz, pathway.set = ensg.to.pathway.list[[gs.nm]]) },
-          { stop(paste0("Wasn't expecting ", mdl, "\n")) }) })
-      }
-cat(paste0("Done calculating expected overlap for ", gs.nm, " and ", mdl, "\n"))
-print(head(names(expected.fracs[[gs.nm]])))
-print(head(expected.fracs[[gs.nm]][[list.sizes[1]]]))
-      }
-    }
-
+    responses <- c("random", "mean.feature", "model.mean.feature", "no.transform", responses[!(responses %in% c("mean.feature", "random", "no.transform", "model.mean.feature"))])
     for(resp in responses) {
       tbl.resp <- subset(tbl.model, pt.response == resp)
       universe <- universes[[gset]]
       if(grepl(resp, pattern= "mean.feature")) { universe <- c(universe, "mean.resp") }
+
+## We will not consider "mean.resp" in the feature overlap.
+      mx <- length(universe[!grepl(pattern="mean", universe)])
+      by <- 10
+      from <- 10
+      if(gset != "gene") { by <- 5; from <- 5 }
+      list.sizes <- c(seq(from=from,to=1000, by=by), 10,100,1000,2000,5000,7000,7500,7600,mx-100,
+                      mx-10,mx-1, mx,mx+1,8000) 
+      list.sizes <- list.sizes[list.sizes <= mx]
+      list.sizes <- list.sizes[list.sizes > 0]
+      list.sizes <- sort(list.sizes)
+      names(list.sizes) <- list.sizes
+
+
 
       print(c(gset, mdl, resp))
 
@@ -197,74 +103,30 @@ if(FALSE) {
       dir.create(ppath)
       if(gset == "gene") {
         pthwys <- names(ensg.to.pathway.list)
-        if(length(pthwys) > 0) { 
         for(gs.nm in pthwys[pthwys %in% c("go.BP", "kegg")]) {
 
-          path <- paste0(ppath, "/", paste(mdl, "path", gs.nm, resp, sep="-"))
+          path <- paste0(ppath, "/", paste(mdl, gs.nm, resp, sep="-"))
           dir.create(path)
           ofile <- paste0(path, "/", file.prefix, "-", paste(mdl, "path", gs.nm, resp, sep="-"), "-ohsu-vs-fimm-top-feature-overlap")
-          main <- paste(mdl, "path", gs.nm, resp, sep=" ")
-
-## We will not consider "mean.resp" in the feature overlap.
-      mx <- max(length(universe[!grepl(pattern="mean", universe)]), length(names(ensg.to.pathway.list[[gs.nm]])))
-##      list.sizes <- c(seq(from=5,to=100, by=5), seq(from=100, to=500, by=10), seq(from=500, to=1000, by=25), 2000,5000,7000,7500,7600,mx-100, mx-10,mx-1, mx,mx+1,8000) 
-      list.sizes <- c(seq(from=5,to=100, by=5), seq(from=100, to=500, by=10), seq(from=500, to=1000, by=25))
-      list.sizes <- list.sizes[list.sizes <= mx]
-      list.sizes <- list.sizes[list.sizes > 0]
-      list.sizes <- unique(sort(list.sizes))
-      names(list.sizes) <- list.sizes
-
           save(tbl.resp, file="tbl.resp.Rd")
           save(tbl.sub, file="tbl.sub.Rd")
           save(universe, file="universe.Rd")
           save(list.sizes, file="list.sizes.Rd") 
           save(ensg.to.pathway.list, file="ensg.to.pathway.list.Rd")
-          save(gs.nm, file="gs.nm.Rd")
-          save(ofile, file="ofile.Rd")
-          save(main, file="main.Rd")
-
-cat(paste0("Calling plot.overlap.of.pathways: ", gs.nm, "\n"))
-
-          switch(mdl,
-            "rf" = { 
-##                      plot.overlap.of.pathways(tbl.resp, tbl.sub, universe = universe, transform = "none", list.sizes = list.sizes, ofile.prefix = ofile, main = main, pathway.set = ensg.to.pathway.list[[gs.nm]]) 
-                      plot.overlap.of.pathways(tbl.resp, tbl.sub, universe = universe, transform = "none", list.sizes = list.sizes, ofile.prefix = ofile, main = main, pathway.set = ensg.to.pathway.list[[gs.nm]], expected.fracs = expected.fracs[[gs.nm]]) 
-            },
-            "lasso" = { 
-##                        plot.overlap.of.pathways(tbl.resp, tbl.sub, universe = universe, transform = "abs.drop.zero", list.sizes = list.sizes, ofile.prefix = ofile, main = main, pathway.set = ensg.to.pathway.list[[gs.nm]]) 
-                        plot.overlap.of.pathways(tbl.resp, tbl.sub, universe = universe, transform = "abs.drop.zero", list.sizes = list.sizes, ofile.prefix = ofile, main = main, pathway.set = ensg.to.pathway.list[[gs.nm]], expected.fracs = expected.fracs[[gs.nm]]) 
-            },
-            "ridge" = { 
-##                        plot.overlap.of.pathways(tbl.resp, tbl.sub, universe = universe, transform = "abs.drop.zero", list.sizes = list.sizes, ofile.prefix = ofile, main = main, pathway.set = ensg.to.pathway.list[[gs.nm]]) 
-                        plot.overlap.of.pathways(tbl.resp, tbl.sub, universe = universe, transform = "abs.drop.zero", list.sizes = list.sizes, ofile.prefix = ofile, main = main, pathway.set = ensg.to.pathway.list[[gs.nm]], expected.fracs = expected.fracs[[gs.nm]]) 
-            },
-            { stop(paste0("Wasn't expecting ", mdl, "\n")) })
-
-
-##          plot.overlap.of.pathways(tbl.resp, tbl.sub, universe = universe, transform = "abs.drop.zero", list.sizes = list.sizes, ofile.prefix = ofile, main = main, pathway.set = ensg.to.pathway.list[[gs.nm]])
+cat("Calling plot.overlap.of.pathways\n")
+          plot.overlap.of.pathways(tbl.resp, tbl.sub, universe = universe, transform = "abs.drop.zero", list.sizes = list.sizes, ofile.prefix = ofile, pathway.set = ensg.to.pathway.list[[gs.nm]])
 cat("Done calling plot.overlap.of.pathways\n")
-        }
         }
       }
 
 
-## We will not consider "mean.resp" in the feature overlap.
-      mx <- length(universe[!grepl(pattern="mean", universe)])
-      list.sizes <- c(seq(from=5,to=100, by=5), seq(from=100, to=500, by=10), seq(from=500, to=1000, by=25))
-      list.sizes <- list.sizes[list.sizes <= mx]
-      list.sizes <- list.sizes[list.sizes > 0]
-      list.sizes <- unique(sort(list.sizes))
-      names(list.sizes) <- list.sizes
-
-      cat(paste0("About to do feature-level: ", gset, "\n"))
       num.sigs <- ldply(list.sizes, .parallel = TRUE,
                            .fun = function(sz) {
                                     tmp <- NULL
                                     switch(mdl,
-
-                                      "rf" = { tmp <- find.overlap.of.sparse.predictors(tbl.resp, universe = universe, transform = "none", top = sz, verbose = FALSE, account.for.sign.of.coeff = FALSE) },
-                                      "lasso" = { tmp <- find.overlap.of.sparse.predictors(tbl.resp, universe = universe, transform = "abs.drop.zero", top = sz, verbose = FALSE, account.for.sign.of.coeff = TRUE) },
-                                      "ridge" = { tmp <- find.overlap.of.sparse.predictors(tbl.resp, universe = universe, transform = "abs.drop.zero", top = sz, verbose = FALSE, account.for.sign.of.coeff = TRUE) },
+                                      "rf" = { tmp <- find.overlap.of.sparse.predictors(tbl.resp, universe = universe, transform = "none", top = sz, verbose = FALSE) },
+                                      "lasso" = { tmp <- find.overlap.of.sparse.predictors(tbl.resp, universe = universe, transform = "abs.drop.zero", top = sz, verbose = FALSE) },
+                                      "ridge" = { tmp <- find.overlap.of.sparse.predictors(tbl.resp, universe = universe, transform = "abs.drop.zero", top = sz, verbose = FALSE) },
                                       { stop(paste0("Wasn't expecting ", mdl, "\n")) })
                                     tmp <- tmp[, c("FIMM_DRUG_NAME", "train.set.1", "train.set.2", "n.1", "n.2", "n.both", "n.neither", "n.expected", "pval", "top", "gene.set.1")]
                                     tmp
@@ -277,9 +139,9 @@ cat("Done calling plot.overlap.of.pathways\n")
       tmp$pval <- as.numeric(tmp$pval)
       tmp$corr.pval <- as.numeric(tmp$corr.pval)
       tmp <- tmp[order(tmp$corr.pval), ]
-##      flag <- !is.na(tmp$corr.pval) & !is.na(tmp$corr) & (tmp$corr.pval < 0.05) & (tmp$corr > 0)
-##      if(any(flag)) { }
-##      tmp <- tmp[flag,,drop=F]
+      flag <- tmp$corr.pval < 0.05
+      if((any(flag))) { 
+      tmp <- tmp[flag,,drop=F]
       tmp$FIMM_DRUG_NAME <- factor(as.character(tmp$FIMM_DRUG_NAME), levels = unique(tmp$FIMM_DRUG_NAME))
       ppath <- "top-feature-plots"
       dir.create(ppath)
@@ -288,7 +150,6 @@ cat("Done calling plot.overlap.of.pathways\n")
       gs <- dlply(tmp, .variables = c("FIMM_DRUG_NAME"), .parallel = FALSE,
             .fun = function(df) {
                      pdf(paste0(path, "/", file.prefix, "-", paste(mdl, gset, resp, df$FIMM_DRUG_NAME[1], sep="-"), "-ohsu-vs-fimm-top-feature-overlap.pdf"))
-write.table(file = paste0(path, "/", file.prefix, "-", paste(mdl, gset, resp, df$FIMM_DRUG_NAME[1], sep="-"), "-ohsu-vs-fimm-top-feature-overlap.tsv"), df, row.names = FALSE, col.names = TRUE, sep = "\t", quote = FALSE)
                      flag <- !is.na(df$n.both)
                      corr <- df$corr[1]; corr.pval <- df$corr.pval[1]
     ##                 if((corr < 0) || (corr.pval > 0.05)) { return() }
@@ -311,30 +172,18 @@ write.table(file = paste0(path, "/", file.prefix, "-", paste(mdl, gset, resp, df
                      max.deviance <- max(df$frac - df$frac.expected, na.rm=TRUE)
                      min.pval <- NA
                      if(any(!is.na(df$pval))) { min.pval <- min(df$pval, na.rm=TRUE) }
-                     list("g1" = g1, "g2" = g2, "max.deviance" = max.deviance, "min.pval" = min.pval, "corr" = df$corr[1], "corr.pval" = df$corr.pval[1])
+                     list("g1" = g1, "g2" = g2, "max.deviance" = max.deviance, "min.pval" = min.pval)
             })
       md <- unlist(lapply(gs, function(l) l$max.deviance))
       mp <- unlist(lapply(gs, function(l) l$min.pval))
       md.df <- data.frame(max.deviance = md, min.pval = mp, gene.set = gset, model = mdl, response = resp, cmp = "ohsu-vs-fimm", stringsAsFactors = FALSE)
       max.deviance.df <- rbind(max.deviance.df, md.df)
-      pdf(paste0(path, "/", file.prefix, "-", paste(mdl, gset, resp, "all", sep="-"), "-ohsu-vs-fimm-top-feature-overlap.pdf"))
-      any.sig <- FALSE
+      pdf(paste0(file.prefix, "-", paste(mdl, gset, resp, "all", sep="-"), "-ohsu-vs-fimm-top-feature-overlap.pdf"))
       for(i in 1:length(gs)) {
         grid.arrange(gs[[i]]$g1, gs[[i]]$g2)
-        if( !is.na(gs[[i]]$corr.pval) && !is.na(gs[[i]]$corr) && (as.numeric(gs[[i]]$corr.pval) < 0.05) && (as.numeric(gs[[i]]$corr) > 0) ) { any.sig <- TRUE }
       }
       d <- dev.off()
-      if(any.sig) {
-        pdf(paste0(path, "/", file.prefix, "-", paste(mdl, gset, resp, "all-sig", sep="-"), "-ohsu-vs-fimm-top-feature-overlap.pdf"))
-        for(i in 1:length(gs)) {
-          if( !is.na(gs[[i]]$corr.pval) && !is.na(gs[[i]]$corr) && (as.numeric(gs[[i]]$corr.pval) < 0.05) && (as.numeric(gs[[i]]$corr) > 0) ) { 
-            grid.arrange(gs[[i]]$g1, gs[[i]]$g2)
-          }
-        }
-        d <- dev.off()
-      }
-
-##      } ##       if((any(flag)))
+      } ##       if((any(flag)))
 if(FALSE) {
       ## Look at overlap between OHSU1 and OHSU2
       tbl.sub <- subset(tbl.full, model == mdl & gene.set == gset & pt.response == resp & train.set == "ohsu.set1" & test.set == "ohsu.set2" & metric == "pearson")
@@ -400,7 +249,7 @@ if(FALSE) {
       tmp$pval <- as.numeric(tmp$pval)
       tmp$corr.pval <- as.numeric(tmp$corr.pval)
       tmp <- tmp[order(tmp$corr.pval), ]
-      flag <- tmp$corr.pval < 0.05 & tmp$corr > 0
+      flag <- tmp$corr.pval < 0.05
 
       tmp <- tmp[flag,,drop=F]
       tmp$FIMM_DRUG_NAME <- factor(as.character(tmp$FIMM_DRUG_NAME), levels = unique(tmp$FIMM_DRUG_NAME))
@@ -537,5 +386,3 @@ for(gset in gsets) {
 
   }
 }
-
-cat("Done with foo.R\n")

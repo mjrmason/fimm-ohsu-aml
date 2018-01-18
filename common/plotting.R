@@ -47,6 +47,52 @@ scatterplot <- function(ds1, drug1, ds2, drug2, save.to.pdf = TRUE, use.smooth =
   if(save.to.pdf) { d <- dev.off() }
 }
 
+drug.scatterplot <- function(res.auc, gene.set, ds1, drug1, ds2, drug2, save.to.pdf = TRUE, use.smooth = FALSE, alpha = 0, model = "glmnet", ...) {
+  par(pty = "s")  
+  foo <- extract.fit(res.auc[["all.fits"]][[ds1]][[gene.set]], train.drug = drug1, alpha = alpha, model = model)
+  bar <- extract.fit(res.auc[["all.fits"]][[ds2]][[gene.set]], train.drug = drug2, alpha = alpha, model = model)
+  c1 <- get.fit.coeff(foo, model)
+  c2 <- get.fit.coeff(bar, model)
+  c1 <- c1[!grepl(pattern="Intercept", names(c1))]
+  c2 <- c2[!grepl(pattern="Intercept", names(c2))]
+  c2 <- c2[names(c1)]
+
+  print(drug1)
+  r1 <- rank(c1)
+  r2 <- rank(c2)
+  top <- 20
+  flag <- (r1 < top) & (r2 < top)
+  if(any(flag)) { 
+    print(c1[flag])
+    cat(paste(names(c1)[flag], collapse=", "), "\n") 
+  }
+  r1 <- rank(-c1)
+  r2 <- rank(-c2)
+  flag <- (r1 < top) & (r2 < top)
+  if(any(flag)) { 
+    print(c1[flag])
+    cat(paste(names(c1)[flag], collapse=", "), "\n") 
+  }
+
+  if(save.to.pdf) { pdf(paste0(ds1, "-", drug11, "-vs-", ds2, "-", drug2, "-scatter.pdf")) }
+  x = c1
+  y = c2
+
+  all = c(x,y)
+##  range = c(min(all, na.rm=TRUE), max(all, na.rm=TRUE))
+##  plot(c1, c2, xlab = paste0(ds1, " ", drug1, " ridge coefficients"), ylab = paste0(ds2, " ", drug2, " ridge coefficients"), xlim=range, ylim=range)
+  if(use.smooth) {
+    smoothScatter(c1, c2, xlab = paste0(ds1, " ", drug1, " ridge coefficients"), ylab = paste0(ds2, " ", drug2, " ridge coefficients"), xlim=range, ylim=range)
+  } else {
+##    plot(c1, c2, xlab = paste0(ds1, " ", drug1, " ridge coefficients"), ylab = paste0(ds2, " ", drug2, " ridge coefficients"), xlim=range, ylim=range)
+    plot(c1, c2, xlab = paste0(ds1, " ", drug1, " ridge coefficients"), ylab = paste0(ds2, " ", drug2, " ridge coefficients"), ...)
+  }
+  reg <- lm(c2 ~ c1)
+  abline(reg, col = "blue")
+  if(save.to.pdf) { d <- dev.off() }
+}
+
+
 my.qqnorm <- function(vec, ...) {
   qq = qqnorm(vec, ...)
   outliers <- boxplot.stats(vec)$out

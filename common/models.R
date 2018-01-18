@@ -174,10 +174,101 @@ n.features <- df$n.features
   trn.tbl
 }
 
+plot.overlap.of.pathways <- function(tbl.resp, tbl.sub, universe, transform = "abs.drop.zero", list.sizes, ofile.prefix, main, pathway.set, expected.fracs = NULL) {
+
+      cat("Calling find.overlap.of.sparse.predictors.simulated\n")
+      flag <- !is.na(tbl.sub$corr) & !is.na(tbl.sub$corr.pval) & (tbl.sub$corr > 0) & (tbl.sub$corr.pval < 0.05)
+      if(length(which(flag)) < 1) { return }
+      keep <- unlist(apply(tbl.sub[flag,c("train.drug", "gene.set"),drop=F], 1, function(row) gsub(x=paste(row,collapse="-"), pattern=" ", replacement="")))
+      tbl.sub <- tbl.sub[flag,,drop=F]
+      keep.flag <- unlist(apply(tbl.resp[,c("train.drug", "gene.set")], 1, function(row) gsub(x=paste(row,collapse="-"), pattern=" ", replacement="") %in% keep))
+      tbl.resp <- tbl.resp[keep.flag,,drop=F]
+      if(nrow(tbl.resp) < 1) { return }
+      num.sigs <- ldply(list.sizes, .parallel = TRUE,
+                           .fun = function(sz) {
+if(!(as.character(sz) %in% names(expected.fracs))) {
+  save(expected.fracs, file="expected.fracs.prob.Rd")
+  stop(paste0("Could not find ", sz, " in expected.fracs\n"))
+}
+                                    tmp <- find.overlap.of.sparse.predictors.simulated(tbl.resp, universe = universe, transform = transform, top = sz, pathway.set = pathway.set, verbose = FALSE, expected.fracs = expected.fracs[[as.character(sz)]])
+                                    tmp <- tmp[, c("FIMM_DRUG_NAME", "train.set.1", "train.set.2", "frac.overlap", "exp.frac.overlap", "lb", "ub", "pval", "top", "gene.set.1")]
+                                    tmp
+                                  })
+      cat("Done calling find.overlap.of.sparse.predictors.simulated\n")
+      tmp <- merge(subset(num.sigs, (train.set.1 == "ohsu") & (train.set.2 == "fimm")), tbl.sub, by.x = c("FIMM_DRUG_NAME", "gene.set.1"), by.y = c("test.drug", "gene.set"))
+      if(nrow(tmp) < 1) { return }
+      tmp$top <- as.numeric(tmp$top)
+      tmp$frac.overlap <- as.numeric(tmp$frac.overlap)
+      tmp$exp.frac.overlap <- as.numeric(tmp$exp.frac.overlap)
+##print(tmp[tmp$exp.frac.overlap > 0,])
+      tmp$lb <- as.numeric(tmp$lb)
+      tmp$ub <- as.numeric(tmp$ub)
+      tmp$pval <- as.numeric(tmp$pval)
+      tmp$corr.pval <- as.numeric(tmp$corr.pval)
+      tmp <- tmp[order(tmp$corr.pval), ]
+      flag <- !is.na(tmp$corr.pval) & !is.na(tmp$corr) & (tmp$corr.pval < 0.05) & (tmp$corr > 0)
+##      flag <- !is.na(tmp$corr.pval) & !is.na(tmp$corr)
+##      flag <- tmp$corr.pval < 0.05 & tmp$corr > 0
+      if(!(any(flag))) { return }
+      tmp <- tmp[flag,,drop=F]
+      tmp$FIMM_DRUG_NAME <- factor(as.character(tmp$FIMM_DRUG_NAME), levels = unique(tmp$FIMM_DRUG_NAME))
+      gs <- dlply(tmp, .variables = c("FIMM_DRUG_NAME"), .parallel = FALSE,
+            .fun = function(df) {
+                     flag <- !is.na(df$frac.overlap)
+##if(TRUE) {
+                     if(length(which(flag)) >= 2) { 
+                       write.table(file = paste0(paste(ofile.prefix, df$FIMM_DRUG_NAME[1], sep="-"), "-ohsu-vs-fimm-top-feature-overlap.tsv"), df, row.names = FALSE, col.names = TRUE, quote = FALSE, sep = "\t")
+                       pdf(paste0(paste(ofile.prefix, df$FIMM_DRUG_NAME[1], sep="-"), "-ohsu-vs-fimm-top-feature-overlap.pdf"))
+                       corr <- df$corr[1]; corr.pval <- df$corr.pval[1]
+                       df2 <- df[flag,,drop=F]
+                       df2$value <- df2$frac.overlap
+                       df2$Fraction <- rep("Observed", nrow(df2))
+                       df2$colour = "black"
+                       df3 <- df2
+                       df3$value <- df3$exp.frac.overlap
+                       df3$Fraction <- rep("Expected", nrow(df3))
+                       df3$colour = "red"
+                       df3 <- rbind(df2, df3)
+##                       df3$colour <- factor(df3$colour, levels=c("red", "black"))
+                       df3$colour <- factor(df3$colour, levels=c("black", "red"))
+##                       g1 <- ggplot(data = df[flag,,drop=F])
+                       g1 <- ggplot()
+##                       g1 <- g1 + geom_errorbar(aes(x = top, ymin = lb, ymax = ub, colour = "red"))
+##                       g1 <- g1 + geom_point(aes(x = top, y = exp.frac.overlap, colour = "red"))
+##                       g1 <- g1 + geom_point(aes(x = top, y = frac.overlap)) + xlab("Num Top Features") + ylab("Fraction Overlapping")
+##                       g1 <- g1 + geom_errorbar(data = df3[df3$Fraction == "Expected",,drop=F], aes(x = top, ymin = lb, ymax = ub, colour = colour))
+                       g1 <- g1 + geom_errorbar(data = df3[df3$Fraction == "Expected",,drop=F], aes(x = top, ymin = lb, ymax = ub, colour = Fraction))
+##                       g1 <- g1 + geom_point(data = df3, aes(x = top, y = value, colour = colour))
+                       g1 <- g1 + geom_point(data = df3[df3$Fraction == "Expected",], aes(x = top, y = value, colour = Fraction))
+                       g1 <- g1 + geom_point(data = df3[df3$Fraction == "Observed",], aes(x = top, y = value, colour = Fraction))
+                       g1 <- g1 + xlab("Num Top Features") + ylab("Fraction Overlapping")
+                       g1 <- g1 + ggtitle(paste0(paste(df$FIMM_DRUG_NAME[1], main, sep=" "), ": corr = ", signif(df$corr[1], digits=2), " pval = ", signif(df$corr.pval[1], digits=2)))
+                       g1 <- g1 + theme(legend.position = "top")
+                       g1 <- g1 + scale_color_manual(breaks = c("Expected", "Observed"), values=c("red", "black"))
+##                       g1 <- g1 + scale_colour_manual(values=c("black", "red"), name="Fraction", labels=c("Observed", "Expected"))
+                       g2 <- ggplot(data = df[flag,]) + geom_point(aes(x = top, y = -log10(pval))) + xlab("Num Top Features") + ylab("Overlap -log10 p-value")
+                       g2 <- g2 + geom_hline(yintercept = -log10(0.05))
+                       grid.arrange(g1, g2)
+                       d <- dev.off()
+                       return(list("g1" = g1, "g2" = g2))
+                     }
+                     return(list("g1" = NULL, "g2" = NULL))
+            })
+      pdf(paste0(paste(ofile.prefix, "all", sep="-"), "-ohsu-vs-fimm-top-feature-overlap.pdf"))
+      for(i in 1:length(gs)) {
+        if(!is.null(gs[[i]]$g1) && !is.null(gs[[i]]$g2)) {
+          grid.arrange(gs[[i]]$g1, gs[[i]]$g2)
+        }
+      }
+      d <- dev.off()
+
+}
+
 ## transform = c("none", "abs", "negate")
 ## top = # of features to consider in overall
 ## top = 0 -> use all
-find.overlap.of.sparse.predictors <- function(tbl.input, universe, transform, top, gene.sets = NULL, verbose = FALSE) {
+## account.for.sign.of.coeff = TRUE -> only consider coeffs overlapping if they have the same sign
+find.overlap.of.sparse.predictors <- function(tbl.input, universe, transform, top, gene.sets = NULL, verbose = FALSE, account.for.sign.of.coeff = TRUE) {
   ret.tbl <- c()
   for(gs in unique(tbl.input$gene.set)) {
     tmp <- subset(tbl.input, gene.set == gs)
@@ -201,11 +292,17 @@ find.overlap.of.sparse.predictors <- function(tbl.input, universe, transform, to
         m$id <- 1:nrow(m)
         hyp <- ddply(m, .variables = "id.1", .parallel = FALSE,
                      .fun = function(r1) {
+drug.name <- r1[1,drug.name.col]
                         n.f1 <- as.numeric(r1$n.features.1)
                         coeff.vals.1 <- as.numeric(unlist(strsplit(as.character(r1$coeff.vals.1), split=",")))
                         coeffs.1 <- (unlist(strsplit(as.character(r1$coeffs.1), split=",")))
                         names(coeff.vals.1) <- coeffs.1
                         coeffs.1 <- coeff.vals.1
+                        ## append "-" to the name if coeff is negative
+                        if(account.for.sign.of.coeff) {
+                          names(coeffs.1) <- unlist(lapply(1:length(coeffs.1), function(ind) { ifelse(is.na(coeffs.1[ind]) || (coeffs.1[ind] >= 0), names(coeffs.1)[ind], paste0("-", names(coeffs.1)[ind])) }))
+                        }
+##save(coeffs.1, file=paste0(drug.name, "-coeffs.1.Rd"))
                         switch(transform,
                           "drop.zero" = { 
                              coeffs.1 <- coeffs.1[coeffs.1 > 0]
@@ -221,7 +318,8 @@ find.overlap.of.sparse.predictors <- function(tbl.input, universe, transform, to
                           "negate" = {
                              coeffs.1 <- - coeffs.1
                           })
-
+                        coeffs.1 <- sort(coeffs.1, decreasing=TRUE)
+##save(coeffs.1, file=paste0(drug.name, "-sorted-coeffs.1.Rd"))
                         ddply(r1, .variables = "id", .parallel = FALSE,
                               .fun = function(r) {
                         n.f2 <- as.numeric(r$n.features.2)
@@ -229,6 +327,10 @@ find.overlap.of.sparse.predictors <- function(tbl.input, universe, transform, to
                                  coeffs.2 <- (unlist(strsplit(as.character(r$coeffs.2), split=",")))
                                  names(coeff.vals.2) <- coeffs.2
                                  coeffs.2 <- coeff.vals.2
+                                 if(account.for.sign.of.coeff) {
+                                   names(coeffs.2) <- unlist(lapply(1:length(coeffs.2), function(ind) { ifelse(is.na(coeffs.2[ind]) || (coeffs.2[ind] >= 0), names(coeffs.2)[ind], paste0("-", names(coeffs.2)[ind])) }))
+                                 }
+##save(coeffs.2, file=paste0(drug.name, "-coeffs.2.Rd"))
                                  switch(transform,
                                    "drop.zero" = { 
                                       coeffs.2 <- coeffs.2[coeffs.2 > 0]
@@ -244,7 +346,8 @@ find.overlap.of.sparse.predictors <- function(tbl.input, universe, transform, to
                                    "negate" = {
                                       coeffs.2 <- - coeffs.2
                                    })
-
+                                 coeffs.2 <- sort(coeffs.2, decreasing=TRUE)
+##save(coeffs.2, file=paste0(drug.name, "-sorted-coeffs.2.Rd"))
                                  ldply(top, .parallel = FALSE,
                                        .fun = function(sz) {
                                                 c1 <- coeffs.1
@@ -264,16 +367,26 @@ if(any(grepl(pattern="mean", universe))) {
 n.f1 <- n.f1 - 1
 n.f2 <- n.f2 - 1
 }
+## Because sign matters, need to double the number of features in the universe
+if(account.for.sign.of.coeff) {
+  n.f1 <- 2 * n.f1
+  n.f2 <- 2 * n.f2
+}
+
+if((sz > length(c1)) || (sz > length(c2))) {
+                                                vec <- c(r$id[1], length(c1), length(c2), NA, NA, NA, NA, NA, sz)
+                                                names(vec) <- c("id", "n.1", "n.2", "n.both", "n.neither", "n.expected", "both", "pval", "top")
+                                                return(vec)
+}
+
                                                 c1.len <- min(sz, length(c1))
                                                 if((sz != 0) && (length(c1) > 0)) {
-                                                  c1 <- sort(c1, decreasing=TRUE)
                                                   c1 <- c1[1:c1.len]
                                                 }
 
                                                 
                                                 c2.len <- min(sz, length(c2))
                                                 if((sz != 0) && (length(c2) > 0)) {
-                                                  c2 <- sort(c2, decreasing=TRUE)
                                                   c2 <- c2[1:c2.len]
                                                 }
                                                 n.1 <- length(c1)
@@ -312,6 +425,385 @@ if(verbose) {
 }
                                                 vec <- c(r$id[1], n.1, n.2, n.both, n.neither, n.expected, both, pval, sz)
                                                 names(vec) <- c("id", "n.1", "n.2", "n.both", "n.neither", "n.expected", "both", "pval", "top")
+                                                vec
+                                  })
+                               })
+                             })
+        hyp <- hyp[, !grepl(pattern="id.1", x=colnames(hyp))]
+        m <- m[, !grepl(pattern="id.1", x=colnames(m))]
+        hyp <- merge(hyp, m, by = "id")
+        ret.tbl <- rbind(ret.tbl, hyp)
+      }
+    }
+  }
+  ret.tbl
+}
+
+## transform = c("none", "abs", "negate")
+## top = # of features to consider in overall
+## top = 0 -> use all
+calc.expected.overlap.of.pathways.old <- function(tbl.input, universe, transform, top, pathway.set, verbose = FALSE) {
+  expected.fracs <- list()
+  for(gs in unique(tbl.input$gene.set)) {
+    tmp <- subset(tbl.input, gene.set == gs)
+    tr.sets <- as.character(unique(tmp$train.set))
+    for(i in 1:(length(tr.sets)-1)) {
+      tr1 <- tr.sets[i]
+      tmp1 <- subset(tmp, train.set == tr1)
+      merge.col <- drug.name.col
+      tmp1 <- merge(drug.name.tbl, tmp1, by.x = merge.col, by.y = "train.drug")
+      for(j in (i+1):length(tr.sets)) {
+        tr2 <- tr.sets[j]
+        if(((tr1 == "ohsu") || (tr2 == "ohsu")) && (grepl(pattern="ohsu.set1", paste0(tr1,tr2)) || grepl(pattern="ohsu.set2", paste0(tr1,tr2)))) { next }
+        if(((tr1 == "fimm") || (tr2 == "fimm")) && (grepl(pattern="fimm.set1", paste0(tr1,tr2)) || grepl(pattern="fimm.set2", paste0(tr1,tr2)))) { next }
+        tmp2 <- subset(tmp, train.set == tr2)
+        merge.col <- drug.name.col
+        tmp2 <- merge(drug.name.tbl, tmp2, by.x = merge.col, by.y = "train.drug")
+        tmp1$id.1 <- 1:nrow(tmp1)
+        m <- merge(tmp1, tmp2, by = merge.col, suffixes = c(".1", ".2"))
+        m <- m[, c(merge.col, "id.1", "n.features.1", "n.features.2", "coeffs.1", "coeffs.2", "coeff.vals.1", "coeff.vals.2", "train.set.1", "train.set.2", "gene.set.1")]
+        m$id <- 1:nrow(m)
+        hyp <- ddply(m, .variables = "id.1", .parallel = FALSE,
+                     .fun = function(r1) {
+                        n.f1 <- as.numeric(r1$n.features.1)
+                        coeff.vals.1 <- as.numeric(unlist(strsplit(as.character(r1$coeff.vals.1), split=",")))
+                        coeffs.1 <- (unlist(strsplit(as.character(r1$coeffs.1), split=",")))
+                        names(coeff.vals.1) <- coeffs.1
+                        coeffs.1 <- coeff.vals.1
+                        ## append "-" to the name if coeff is negative
+## not clear how to handle this since we map to pathways
+##                        names(coeffs.1) <- unlist(lapply(1:length(coeffs.1), function(ind) { ifelse(is.na(coeffs.1[ind]) || (coeffs.1[ind] >= 0), names(coeffs.1)[ind], paste0("-", names(coeffs.1)[ind])) }))
+                        switch(transform,
+                          "drop.zero" = { 
+                             coeffs.1 <- coeffs.1[coeffs.1 > 0]
+                          },
+                          "none" = { },
+                          "abs" = {
+                             coeffs.1 <- abs(coeffs.1)
+                          },
+                          "abs.drop.zero" = {
+                             coeffs.1 <- abs(coeffs.1)
+                             coeffs.1 <- coeffs.1[coeffs.1 != 0]
+                          },
+                          "negate" = {
+                             coeffs.1 <- - coeffs.1
+                          })
+                          coeffs.1 <- sort(coeffs.1, decreasing=TRUE)
+drug.name <- r1[1,drug.name.col]
+                        ddply(r1, .variables = "id", .parallel = FALSE,
+                              .fun = function(r) {
+                        n.f2 <- as.numeric(r$n.features.2)
+                                 coeff.vals.2 <- as.numeric(unlist(strsplit(as.character(r$coeff.vals.2), split=",")))
+                                 coeffs.2 <- (unlist(strsplit(as.character(r$coeffs.2), split=",")))
+                                 names(coeff.vals.2) <- coeffs.2
+                                 coeffs.2 <- coeff.vals.2
+##                                 names(coeffs.2) <- unlist(lapply(1:length(coeffs.2), function(ind) { ifelse(is.na(coeffs.2[ind]) || (coeffs.2[ind] >= 0), names(coeffs.2)[ind], paste0("-", names(coeffs.2)[ind])) }))
+                                 switch(transform,
+                                   "drop.zero" = { 
+                                      coeffs.2 <- coeffs.2[coeffs.2 > 0]
+                                   },
+                                   "none" = { },
+                                   "abs" = {
+                                      coeffs.2 <- abs(coeffs.2)
+                                   },
+                                   "abs.drop.zero" = {
+                                      coeffs.2 <- abs(coeffs.2)
+                                      coeffs.2 <- coeffs.2[coeffs.2 != 0]
+                                   },
+                                   "negate" = {
+                                      coeffs.2 <- - coeffs.2
+                                   })
+                                 coeffs.2 <- sort(coeffs.2, decreasing=TRUE)
+                                 ldply(top, .parallel = FALSE,
+                                       .fun = function(sz) {
+                                                c1 <- coeffs.1
+                                                c2 <- coeffs.2
+                                                if(length(c1) > 0) {
+                                                  c1 <- c1[!duplicated(names(c1))]
+                                                }
+                                                if(length(c2) > 0) {
+                                                  c2 <- c2[!duplicated(names(c2))]
+                                                }
+c1 <- c1[is.finite(c1)]
+c2 <- c2[is.finite(c2)]
+n1 <- min(length(c1), sz)
+n2 <- min(length(c2), sz)
+## Drop any mean response
+c1 <- c1[!grepl(pattern="mean", names(c1))]
+c2 <- c2[!grepl(pattern="mean", names(c2))]
+
+if((sz > length(c1)) || (sz > length(c2))) {
+                                                vec <- c(r$id[1], NA, NA, NA, NA, NA, sz) 
+                                                names(vec) <- c("id", "frac.overlap", "exp.frac.overlap", "lb", "ub", "pval", "top")
+
+                                                return(vec)
+}
+
+
+                                                c1.len <- min(sz, length(c1))
+                                                if((sz != 0) && (length(c1) > 0)) {
+                                                  c1 <- c1[1:c1.len]
+                                                }
+
+                                                
+                                                c2.len <- min(sz, length(c2))
+                                                if((sz != 0) && (length(c2) > 0)) {
+                                                  c2 <- c2[1:c2.len]
+                                                }
+                                                c1 <- names(c1)
+                                                c2 <- names(c2)
+                                                if(any(c1 %in% names(pathway.set))) {
+                                                  c1 <- unique(unlist(lapply(c1[c1 %in% names(pathway.set)], function(gene) pathway.set[[gene]])))
+##                                                  c1 <- unique(unlist(pathway.set[[c1[c1 %in% names(pathway.set)]]]))
+                                                } else { c1 <- "" }
+                                                if(any(c2 %in% names(pathway.set))) {
+                                                  c2 <- unique(unlist(lapply(c2[c2 %in% names(pathway.set)], function(gene) pathway.set[[gene]])))
+##                                                  c2 <- unique(unlist(pathway.set[[c2[c2 %in% names(pathway.set)]]]))
+                                                } else { c2 <- "" }
+                                                c1 <- c1[!is.null(c1) & !is.na(c1) & (c1 != "")]
+                                                c2 <- c2[!is.null(c2) & !is.na(c2) & (c2 != "")]
+                                                obs.frac.overlap <- 0
+                                                both <- intersect(c1, c2)
+                                                if((length(c1) > 0) && (length(c2) > 0)) {
+                                                  obs.frac.overlap <- length(both)/min(length(c1), length(c2))
+                                                }
+
+                                                n.iters <- 1000
+set.seed(1234)
+cat("Calculating frac overlaps\n")
+                                                  expected.fracs[[drug.name]] <- unlist(llply(1:n.iters, .parallel = FALSE,
+                                                                              .fun = function(i) {
+                                                                                       i1 <- sample.int(length(universe), size = n1, replace = FALSE) 
+                                                                                       i2 <- sample.int(length(universe), size = n2, replace = FALSE) 
+                                                                                       c1 <- universe[i1]
+                                                                                       c2 <- universe[i2]
+                                                if(any(c1 %in% names(pathway.set))) {
+                                                  c1 <- unique(unlist(lapply(c1[c1 %in% names(pathway.set)], function(gene) pathway.set[[gene]])))
+##                                                  c1 <- unique(unlist(pathway.set[[c1[c1 %in% names(pathway.set)]]]))
+                                                } else { c1 <- "" }
+                                                if(any(c2 %in% names(pathway.set))) {
+                                                  c2 <- unique(unlist(lapply(c2[c2 %in% names(pathway.set)], function(gene) pathway.set[[gene]])))
+##                                                  c2 <- unique(unlist(pathway.set[[c2[c2 %in% names(pathway.set)]]]))
+                                                } else { c2 <- "" }
+                                                c1 <- c1[!is.null(c1) & !is.na(c1) & (c1 != "")]
+                                                c2 <- c2[!is.null(c2) & !is.na(c2) & (c2 != "")]
+
+                                                                                       frac <- 0
+                                                                                       if((length(c1) > 0) && (length(c2) > 0)) {
+
+                                                                                         frac <- length(intersect(c1,c2))/min(length(c1), length(c2))
+                                                                                       }
+                                                                                       frac
+                                                                                     }))
+                                                
+                                  })
+                               })
+                             })
+      }
+    }
+  }
+  expected.fracs
+}
+
+calc.expected.overlap.of.pathways <- function(universe, transform, top, pathway.set, verbose = FALSE) {
+  n.iters <- 10000
+  set.seed(1234)
+  cat("Calculating frac overlaps\n")
+  iter.vec <- 1:n.iters
+  names(iter.vec) <- iter.vec
+  expected.fracs <- unlist(llply(iter.vec, .parallel = FALSE,
+                           .fun = function(i) {
+                                    i1 <- sample.int(length(universe), size = top, replace = FALSE) 
+                                    i2 <- sample.int(length(universe), size = top, replace = FALSE) 
+                                    c1 <- universe[i1]
+                                    c2 <- universe[i2]
+                                    if(any(c1 %in% names(pathway.set))) {
+                                      c1 <- unique(unlist(lapply(c1[c1 %in% names(pathway.set)], function(gene) pathway.set[[gene]])))
+##                                    c1 <- unique(unlist(pathway.set[[c1[c1 %in% names(pathway.set)]]]))
+                                    } else { c1 <- "" }
+                                    if(any(c2 %in% names(pathway.set))) {
+                                      c2 <- unique(unlist(lapply(c2[c2 %in% names(pathway.set)], function(gene) pathway.set[[gene]])))
+##                                    c2 <- unique(unlist(pathway.set[[c2[c2 %in% names(pathway.set)]]]))
+                                    } else { c2 <- "" }
+                                    c1 <- c1[!is.null(c1) & !is.na(c1) & (c1 != "")]
+                                    c2 <- c2[!is.null(c2) & !is.na(c2) & (c2 != "")]
+
+                                    frac <- 0
+                                    if((length(c1) > 0) && (length(c2) > 0)) {
+                                      frac <- length(intersect(c1,c2))/min(length(c1), length(c2))
+                                    }
+                                    frac
+                                  }))
+  expected.fracs
+}
+
+find.overlap.of.sparse.predictors.simulated <- function(tbl.input, universe, transform, top, pathway.set, verbose = FALSE, expected.fracs = NULL) {
+  ret.tbl <- c()
+  for(gs in unique(tbl.input$gene.set)) {
+    tmp <- subset(tbl.input, gene.set == gs)
+    tr.sets <- as.character(unique(tmp$train.set))
+    for(i in 1:(length(tr.sets)-1)) {
+      tr1 <- tr.sets[i]
+      tmp1 <- subset(tmp, train.set == tr1)
+      merge.col <- drug.name.col
+      tmp1 <- merge(drug.name.tbl, tmp1, by.x = merge.col, by.y = "train.drug")
+      for(j in (i+1):length(tr.sets)) {
+        tr2 <- tr.sets[j]
+        if(((tr1 == "ohsu") || (tr2 == "ohsu")) && (grepl(pattern="ohsu.set1", paste0(tr1,tr2)) || grepl(pattern="ohsu.set2", paste0(tr1,tr2)))) { next }
+        if(((tr1 == "fimm") || (tr2 == "fimm")) && (grepl(pattern="fimm.set1", paste0(tr1,tr2)) || grepl(pattern="fimm.set2", paste0(tr1,tr2)))) { next }
+        tmp2 <- subset(tmp, train.set == tr2)
+        merge.col <- drug.name.col
+        tmp2 <- merge(drug.name.tbl, tmp2, by.x = merge.col, by.y = "train.drug")
+        tmp1$id.1 <- 1:nrow(tmp1)
+        m <- merge(tmp1, tmp2, by = merge.col, suffixes = c(".1", ".2"))
+        m <- m[, c(merge.col, "id.1", "n.features.1", "n.features.2", "coeffs.1", "coeffs.2", "coeff.vals.1", "coeff.vals.2", "train.set.1", "train.set.2", "gene.set.1")]
+        m$id <- 1:nrow(m)
+        hyp <- ddply(m, .variables = "id.1", .parallel = FALSE,
+                     .fun = function(r1) {
+                        n.f1 <- as.numeric(r1$n.features.1)
+                        coeff.vals.1 <- as.numeric(unlist(strsplit(as.character(r1$coeff.vals.1), split=",")))
+                        coeffs.1 <- (unlist(strsplit(as.character(r1$coeffs.1), split=",")))
+                        names(coeff.vals.1) <- coeffs.1
+                        coeffs.1 <- coeff.vals.1
+                        ## append "-" to the name if coeff is negative
+## not clear how to handle this since we map to pathways
+##                        names(coeffs.1) <- unlist(lapply(1:length(coeffs.1), function(ind) { ifelse(is.na(coeffs.1[ind]) || (coeffs.1[ind] >= 0), names(coeffs.1)[ind], paste0("-", names(coeffs.1)[ind])) }))
+                        switch(transform,
+                          "drop.zero" = { 
+                             coeffs.1 <- coeffs.1[coeffs.1 > 0]
+                          },
+                          "none" = { },
+                          "abs" = {
+                             coeffs.1 <- abs(coeffs.1)
+                          },
+                          "abs.drop.zero" = {
+                             coeffs.1 <- abs(coeffs.1)
+                             coeffs.1 <- coeffs.1[coeffs.1 != 0]
+                          },
+                          "negate" = {
+                             coeffs.1 <- - coeffs.1
+                          })
+                          coeffs.1 <- sort(coeffs.1, decreasing=TRUE)
+drug.name <- r1[1,drug.name.col]
+                        ddply(r1, .variables = "id", .parallel = FALSE,
+                              .fun = function(r) {
+                        n.f2 <- as.numeric(r$n.features.2)
+                                 coeff.vals.2 <- as.numeric(unlist(strsplit(as.character(r$coeff.vals.2), split=",")))
+                                 coeffs.2 <- (unlist(strsplit(as.character(r$coeffs.2), split=",")))
+                                 names(coeff.vals.2) <- coeffs.2
+                                 coeffs.2 <- coeff.vals.2
+##                                 names(coeffs.2) <- unlist(lapply(1:length(coeffs.2), function(ind) { ifelse(is.na(coeffs.2[ind]) || (coeffs.2[ind] >= 0), names(coeffs.2)[ind], paste0("-", names(coeffs.2)[ind])) }))
+                                 switch(transform,
+                                   "drop.zero" = { 
+                                      coeffs.2 <- coeffs.2[coeffs.2 > 0]
+                                   },
+                                   "none" = { },
+                                   "abs" = {
+                                      coeffs.2 <- abs(coeffs.2)
+                                   },
+                                   "abs.drop.zero" = {
+                                      coeffs.2 <- abs(coeffs.2)
+                                      coeffs.2 <- coeffs.2[coeffs.2 != 0]
+                                   },
+                                   "negate" = {
+                                      coeffs.2 <- - coeffs.2
+                                   })
+                                 coeffs.2 <- sort(coeffs.2, decreasing=TRUE)
+                                 ldply(top, .parallel = FALSE,
+                                       .fun = function(sz) {
+                                                c1 <- coeffs.1
+                                                c2 <- coeffs.2
+                                                if(length(c1) > 0) {
+                                                  c1 <- c1[!duplicated(names(c1))]
+                                                }
+                                                if(length(c2) > 0) {
+                                                  c2 <- c2[!duplicated(names(c2))]
+                                                }
+c1 <- c1[is.finite(c1)]
+c2 <- c2[is.finite(c2)]
+n1 <- min(length(c1), sz)
+n2 <- min(length(c2), sz)
+## Drop any mean response
+c1 <- c1[!grepl(pattern="mean", names(c1))]
+c2 <- c2[!grepl(pattern="mean", names(c2))]
+
+if((sz > length(c1)) || (sz > length(c2))) {
+                                                vec <- c(r$id[1], NA, NA, NA, NA, NA, sz) 
+                                                names(vec) <- c("id", "frac.overlap", "exp.frac.overlap", "lb", "ub", "pval", "top")
+
+                                                return(vec)
+}
+
+
+                                                c1.len <- min(sz, length(c1))
+                                                if((sz != 0) && (length(c1) > 0)) {
+                                                  c1 <- c1[1:c1.len]
+                                                }
+
+                                                
+                                                c2.len <- min(sz, length(c2))
+                                                if((sz != 0) && (length(c2) > 0)) {
+                                                  c2 <- c2[1:c2.len]
+                                                }
+                                                c1 <- names(c1)
+                                                c2 <- names(c2)
+                                                if(any(c1 %in% names(pathway.set))) {
+                                                  c1 <- unique(unlist(lapply(c1[c1 %in% names(pathway.set)], function(gene) pathway.set[[gene]])))
+##                                                  c1 <- unique(unlist(pathway.set[[c1[c1 %in% names(pathway.set)]]]))
+                                                } else { c1 <- "" }
+                                                if(any(c2 %in% names(pathway.set))) {
+                                                  c2 <- unique(unlist(lapply(c2[c2 %in% names(pathway.set)], function(gene) pathway.set[[gene]])))
+##                                                  c2 <- unique(unlist(pathway.set[[c2[c2 %in% names(pathway.set)]]]))
+                                                } else { c2 <- "" }
+                                                c1 <- c1[!is.null(c1) & !is.na(c1) & (c1 != "")]
+                                                c2 <- c2[!is.null(c2) & !is.na(c2) & (c2 != "")]
+                                                obs.frac.overlap <- 0
+                                                both <- intersect(c1, c2)
+                                                if((length(c1) > 0) && (length(c2) > 0)) {
+                                                  obs.frac.overlap <- length(both)/min(length(c1), length(c2))
+                                                }
+
+                                                n.iters <- 1000
+set.seed(1234)
+                                                frac.overlaps <- NULL
+                                                if(!is.null(expected.fracs)) {
+cat("Using memoized frac overlaps\n")
+                                                  frac.overlaps <- expected.fracs
+                                                } else {
+cat("Calculating frac overlaps\n")
+                                                  frac.overlaps <- unlist(llply(1:n.iters, .parallel = TRUE,
+                                                                              .fun = function(i) {
+                                                                                       i1 <- sample.int(length(universe), size = n1, replace = FALSE) 
+                                                                                       i2 <- sample.int(length(universe), size = n2, replace = FALSE) 
+                                                                                       c1 <- universe[i1]
+                                                                                       c2 <- universe[i2]
+                                                if(any(c1 %in% names(pathway.set))) {
+                                                  c1 <- unique(unlist(lapply(c1[c1 %in% names(pathway.set)], function(gene) pathway.set[[gene]])))
+##                                                  c1 <- unique(unlist(pathway.set[[c1[c1 %in% names(pathway.set)]]]))
+                                                } else { c1 <- "" }
+                                                if(any(c2 %in% names(pathway.set))) {
+                                                  c2 <- unique(unlist(lapply(c2[c2 %in% names(pathway.set)], function(gene) pathway.set[[gene]])))
+##                                                  c2 <- unique(unlist(pathway.set[[c2[c2 %in% names(pathway.set)]]]))
+                                                } else { c2 <- "" }
+                                                c1 <- c1[!is.null(c1) & !is.na(c1) & (c1 != "")]
+                                                c2 <- c2[!is.null(c2) & !is.na(c2) & (c2 != "")]
+
+                                                                                       frac <- 0
+                                                                                       if((length(c1) > 0) && (length(c2) > 0)) {
+
+                                                                                         frac <- length(intersect(c1,c2))/min(length(c1), length(c2))
+                                                                                       }
+                                                                                       frac
+                                                                                     }))
+                                                }
+                                                exp.frac.overlap <- mean(frac.overlaps)
+                                                qs <- quantile(frac.overlaps, probs=c(0.05, 0.95))
+##print(c(obs.frac.overlap, exp.frac.overlap, frac.overlaps))
+                                                lb.frac.overlap <- as.numeric(qs[1])
+                                                ub.frac.overlap <- as.numeric(qs[2])
+                                                pval <- length(which(frac.overlaps >= obs.frac.overlap))/length(frac.overlaps)
+                                                vec <- c(r$id[1], obs.frac.overlap, exp.frac.overlap, lb.frac.overlap, ub.frac.overlap, pval, sz) 
+                                                names(vec) <- c("id", "frac.overlap", "exp.frac.overlap", "lb", "ub", "pval", "top")
                                                 vec
                                   })
                                })
@@ -914,13 +1406,13 @@ test.model <- function(fits, drug.name.tbl, train.drug.col, test.dss.arg, test.e
    test.drc <- test.drc[, test.samples]
 
    if(!is.null(test.genomic)) {
-     test.genomic <- test.genomic[, test.samples]
+     test.genomic <- test.genomic[, test.samples, drop = FALSE]
    }
    if(!is.null(test.clinical)) {
-     test.clinical <- test.clinical[, test.samples]
+     test.clinical <- test.clinical[, test.samples, drop = FALSE]
    }
    if(!is.null(test.expr)) {
-     test.expr <- test.expr[, test.samples]
+     test.expr <- test.expr[, test.samples, drop = FALSE]
    }
 
    z.score.drc <- TRUE
@@ -1011,9 +1503,9 @@ test.model.with.downsampling_ <- function(fits, drug.name.tbl, train.drug.col, t
                              t.expr <- test.expr
                              t.genomic <- test.genomic
                              t.clinical <- test.clinical
-                             if(!is.null(t.expr)) { t.expr <- t.expr[, !flag] }
-                             if(!is.null(t.genomic)) { t.genomic <- t.genomic[, !flag] }
-                             if(!is.null(t.clinical)) { t.clinical <- t.clinical[, !flag] }
+                             if(!is.null(t.expr)) { t.expr <- t.expr[, !flag, drop = FALSE] }
+                             if(!is.null(t.genomic)) { t.genomic <- t.genomic[, !flag, drop = FALSE] }
+                             if(!is.null(t.clinical)) { t.clinical <- t.clinical[, !flag, drop = FALSE] }
                              t.drc <- test.drc[, !flag]
 
                              if(!is.null(num.samples.per.drug)) {
@@ -1025,9 +1517,9 @@ test.model.with.downsampling_ <- function(fits, drug.name.tbl, train.drug.col, t
                                }
                                indices <- sample.int(length(y), size = n.samples, replace = with.replacement)
                                y <- y[indices]
-                               if(!is.null(t.expr)) { t.expr <- t.expr[, indices] }
-                               if(!is.null(t.genomic)) { t.genomic <- t.genomic[, indices] }
-                               if(!is.null(t.clinical)) { t.clinical <- t.clinical[, indices] }
+                               if(!is.null(t.expr)) { t.expr <- t.expr[, indices, drop = FALSE] }
+                               if(!is.null(t.genomic)) { t.genomic <- t.genomic[, indices, drop = FALSE] }
+                               if(!is.null(t.clinical)) { t.clinical <- t.clinical[, indices, drop = FALSE] }
 
                                t.drc <- t.drc[, indices]
                              }
@@ -1118,7 +1610,7 @@ test.model_ <- function(fits, drug.name.tbl, train.drug.col, x.arg, test.drc, te
                              test.drug <- drug.name.tbl[drug.name.tbl[, train.drug.col] == train.drug, test.drug.col]
                              newy <- as.numeric(test.drc[as.character(test.drug),])
                              flag <- is.na(newy)
-                             newx <- newx.orig[, !flag]
+                             newx <- newx.orig[, !flag, drop = F]
                              newy <- newy[!flag]
 
                              n.test <- length(newy)
@@ -1134,7 +1626,7 @@ test.model_ <- function(fits, drug.name.tbl, train.drug.col, x.arg, test.drc, te
 
                              if(model == "glmnet") {
                                flag <- rownames(newx) %in% rownames(coefficients(fit))
-                               newx <- newx[flag, ]
+                               newx <- newx[flag, , drop = F]
                                svalues <- c("lambda.min")
 
                                if((alpha != 0) || (use.ridge == TRUE)) {
@@ -1170,7 +1662,7 @@ test.model_ <- function(fits, drug.name.tbl, train.drug.col, x.arg, test.drc, te
 
 
 ## This function does not format the drug or expression data
-train.model_ <- function(x.arg, train.drc, train.drugs, seed = 1234, use.rf = FALSE, use.svm = FALSE, use.ridge = TRUE, use.mean = TRUE, calc.coefficient.pvals = FALSE, alphas = c(0, 1), keep.forest = TRUE) {
+train.model_ <- function(x.arg, train.drc, train.drugs, seed = 1234, use.rf = FALSE, use.svm = FALSE, use.ridge = TRUE, use.mean = TRUE, calc.coefficient.pvals = FALSE, alphas = c(0, 1), keep.forest = TRUE, use.glmnet.intercept = TRUE) {
 
    ## Fit ridge to training data and apply to validation for each drug independently.
    ret <- llply(1:length(train.drugs),
@@ -1180,15 +1672,16 @@ train.model_ <- function(x.arg, train.drc, train.drugs, seed = 1234, use.rf = FA
                          x <- x.arg
                          y <- as.numeric(train.drc[as.character(train.drug),])
                          flag <- is.na(y)
-                         x <- x[, !flag]
+                         x <- x[, !flag, drop=F]
                          y <- y[!flag]
                          n.train <- length(y)
                          cat(paste0("Modeling ", train.drug, " (n = ", n.train, ")\n"))
 
                          ## Exclude any genes that have no variation in training data set (or were set to NA/NaN by
                          ## z-scoring above)
-                         constant.genes <- rownames(x)[unlist(apply(x, 1, function(row) any(!is.finite(row)) || all(row == row[1])))]
-                         x <- x[!(rownames(x) %in% constant.genes),]
+                         constant.genes <- rownames(x)[unlist(apply(x, 1, function(row) any(!is.finite(row))))]
+##                         constant.genes <- rownames(x)[unlist(apply(x, 1, function(row) any(!is.finite(row)) || all(row == row[1])))]
+##                         x <- x[!(rownames(x) %in% constant.genes), , drop=F]
 
                          n.features <- nrow(x)
 
@@ -1212,7 +1705,7 @@ train.model_ <- function(x.arg, train.drc, train.drugs, seed = 1234, use.rf = FA
                              pvals <- fit.lasso$pval
                            }
                            set.seed(seed)
-                           fit <- tryCatch({cv.glmnet(x = t(x), y, family = "gaussian", type.measure = "mse", nfolds = nfolds, foldid = foldid, alpha = alpha, standardize = FALSE, parallel = TRUE)}, error = function(e) { print(e); cat("glmnet err\n"); return(NA) })
+                           fit <- tryCatch({cv.glmnet(x = t(x), y, family = "gaussian", type.measure = "mse", nfolds = nfolds, foldid = foldid, alpha = alpha, standardize = FALSE, parallel = TRUE, intercept = use.glmnet.intercept)}, error = function(e) { print(e); cat("glmnet err\n"); return(NA) })
                            ret.list[[length(ret.list)+1]] <- list(train.drug = train.drug, fit = fit, alpha = alpha, model = "glmnet", n.train = n.train, pvals = pvals, n.features = n.features)
                          }
 
@@ -1259,9 +1752,9 @@ train.model.with.downsampling_ <- function(train.expr, train.genomic, train.clin
                                         t.expr <- train.expr
                                         t.genomic <- train.genomic
                                         t.clinical <- train.clinical
-                                        if(!is.null(t.expr)) { t.expr <- t.expr[, !flag] }
-                                        if(!is.null(t.genomic)) { t.genomic <- t.genomic[, !flag] }
-                                        if(!is.null(t.clinical)) { t.clinical <- t.clinical[, !flag] }
+                                        if(!is.null(t.expr)) { t.expr <- t.expr[, !flag, drop = FALSE] }
+                                        if(!is.null(t.genomic)) { t.genomic <- t.genomic[, !flag, drop = FALSE] }
+                                        if(!is.null(t.clinical)) { t.clinical <- t.clinical[, !flag, drop = FALSE] }
 
                                         set.seed(iter)
 
@@ -1272,9 +1765,9 @@ train.model.with.downsampling_ <- function(train.expr, train.genomic, train.clin
                                         }
                                         indices <- sample.int(length(y), size = n.samples, replace = with.replacement)
                                         y <- y[indices]
-                                        if(!is.null(t.expr)) { t.expr <- t.expr[, indices] }
-                                        if(!is.null(t.genomic)) { t.genomic <- t.genomic[, indices] }
-                                        if(!is.null(t.clinical)) { t.clinical <- t.clinical[, indices] }
+                                        if(!is.null(t.expr)) { t.expr <- t.expr[, indices, drop = FALSE] }
+                                        if(!is.null(t.genomic)) { t.genomic <- t.genomic[, indices, drop = FALSE] }
+                                        if(!is.null(t.clinical)) { t.clinical <- t.clinical[, indices, drop = FALSE] }
 
                                         t.drc <- t.drc[, indices]
 
@@ -1390,13 +1883,13 @@ train.model <- function(train.dss.arg, train.expr.arg, train.genomic.arg, train.
    train.drc <- train.drc[, train.samples]
 
    if(!is.null(train.genomic)) {
-     train.genomic <- train.genomic[, train.samples]
+     train.genomic <- train.genomic[, train.samples, drop = FALSE]
    }
    if(!is.null(train.clinical)) {
-     train.clinical <- train.clinical[, train.samples]
+     train.clinical <- train.clinical[, train.samples, drop = FALSE]
    }
    if(!is.null(train.expr)) {
-     train.expr <- train.expr[, train.samples]
+     train.expr <- train.expr[, train.samples, drop = FALSE]
    }
 
    z.score.drc <- TRUE
@@ -1599,6 +2092,316 @@ train.and.test.crossproduct <- function(gene.sets, drug.name.tbl, train.set.name
        train.samples <- intersect(train.samples, colnames(train.clinical))
      }
 
+     if(!is.na(train.expr) && !is.null(train.expr)) {
+       train.samples <- intersect(train.samples, colnames(train.expr))
+     }
+
+     train.drc <- train.drc[, train.samples]
+
+     ## Subtract off the mean response _before_ z-scoring
+     if(subtract.mean.response) {
+       cat("Subtracting mean response\n")
+       train.drc.mean <- unname(colMeans(train.drc, na.rm=TRUE))
+       train.drc <- train.drc - matrix(train.drc.mean, nrow=nrow(train.drc), ncol=ncol(train.drc), byrow=TRUE)
+     }
+
+     if(z.score.drc) {
+         # z-score
+         train.drc <- t(scale(t(train.drc), center = TRUE, scale = TRUE))
+     }
+
+     if(!is.null(train.genomic)) {
+       train.genomic <- train.genomic[, train.samples, drop=F]
+     }
+     if(!is.null(train.clinical)) {
+       train.clinical <- train.clinical[, train.samples, drop=F]
+     }
+     if(!is.na(train.expr) && !is.null(train.expr)) {
+       train.expr <- train.expr[, train.samples]
+       flag <- unlist(apply(train.expr, 1, function(row) any(!is.finite(row)) || (any(is.na(row))) || (all(row == row[1]))))
+       train.expr <- train.expr[!flag, , drop=F]
+     }
+
+     train.drcs[[train.set]] <- train.drc
+     train.exprs[[train.set]] <- train.expr
+     train.genomics[[train.set]] <- train.genomic
+     train.clinicals[[train.set]] <- train.clinical
+     rm(train.drc)
+     rm(train.expr)
+     rm(train.genomic)
+     rm(train.clinical)
+     gc()
+   }
+
+   test.drcs <- list()
+   test.exprs <- list()
+   test.genomics <- list()
+   test.clinicals <- list()
+   if(length(test.set.names) > 0) {
+     for(test.indx in 1:length(test.set.names)) {
+       test.set <- test.set.names[[test.indx]]
+       cat(paste0("Preparing test set: ", test.set, "\n"))
+       l <- prepare.drug.response.and.expr.matrices(test.dss.args[[test.indx]], test.expr.args[[test.indx]], drugs = test.common.drugs[[test.indx]], 
+                                                    drug.col = test.drug.cols[[test.indx]], patient.col = test.patient.cols[[test.indx]], response.col = test.response.cols[[test.indx]])
+
+       test.drc <- l[["drc.df"]]
+       test.expr <- l[["expr.df"]]
+
+       test.samples <- colnames(test.drc)
+
+       test.genomic <- test.genomic.args[[test.indx]]
+  
+       if(!is.null(test.genomic)) {
+         test.samples <- intersect(test.samples, colnames(test.genomic))
+       }
+  
+       test.clinical <- test.clinical.args[[test.indx]]
+  
+       if(!is.null(test.clinical)) {
+         test.samples <- intersect(test.samples, colnames(test.clinical))
+       }
+  
+       if(!is.na(test.expr) && !is.null(test.expr)) {
+         test.samples <- intersect(test.samples, colnames(test.expr))
+       }
+  
+       test.drc <- test.drc[, test.samples]
+       ## Subtract off the mean response _before_ z-scoring
+       if(subtract.mean.response) {
+         test.drc.mean <- unname(colMeans(test.drc, na.rm=TRUE))
+         test.drc <- test.drc - matrix(test.drc.mean, nrow=nrow(test.drc), ncol=ncol(test.drc), byrow=TRUE)
+       }
+
+       if(z.score.drc) {
+           # z-score
+           test.drc <- t(scale(t(test.drc), center = TRUE, scale = TRUE))
+       }
+       if(!is.null(test.genomic)) {
+         test.genomic <- test.genomic[, test.samples, drop=F]
+       }
+       if(!is.null(test.clinical)) {
+         test.clinical <- test.clinical[, test.samples, drop=F]
+       }
+       if(!is.na(test.expr) && !is.null(test.expr)) {
+         test.expr <- test.expr[, test.samples]
+         flag <- unlist(apply(test.expr, 1, function(row) any(!is.finite(row)) || (any(is.na(row))) || (all(row == row[1]))))
+         test.expr <- test.expr[!flag, ,drop=F]
+       }
+  
+       test.drcs[[test.set]] <- test.drc
+       test.exprs[[test.set]] <- test.expr
+       test.genomics[[test.set]] <- test.genomic
+       test.clinicals[[test.set]] <- test.clinical
+       rm(test.drc)
+       rm(test.expr)
+       rm(test.genomic)
+       rm(test.clinical)
+       gc()
+     }
+   }
+
+   expr.train.features <- Reduce(intersect, lapply(train.set.names, function(set.name) rownames(train.exprs[[set.name]])))
+   expr.features <- expr.train.features
+
+   genomic.train.features <- Reduce(intersect, lapply(train.set.names, function(set.name) rownames(train.genomics[[set.name]])))
+   genomic.features <- genomic.train.features
+
+   clinical.train.features <- Reduce(intersect, lapply(train.set.names, function(set.name) rownames(train.clinicals[[set.name]])))
+   clinical.features <- clinical.train.features
+
+   if(length(test.set.names) > 0) {
+     expr.test.features <- Reduce(intersect, lapply(test.set.names, function(set.name) rownames(test.exprs[[set.name]])))
+     expr.features <- intersect(expr.train.features, expr.test.features)
+
+     genomic.test.features <- Reduce(intersect, lapply(test.set.names, function(set.name) rownames(test.genomics[[set.name]])))
+     genomic.features <- intersect(genomic.train.features, genomic.test.features)
+
+     clinical.test.features <- Reduce(intersect, lapply(test.set.names, function(set.name) rownames(test.clinicals[[set.name]])))
+     clinical.features <- intersect(clinical.train.features, clinical.test.features)
+   }
+
+   ## Assemble the design matrices (combination of expression, genomic, and clinical) using only common features.
+   for(train.indx in 1:length(train.set.names)) {
+     train.set <- train.set.names[[train.indx]]
+
+     if(!is.na(train.exprs[[train.set]]) && !is.null(train.exprs[[train.set]])) {
+       train.exprs[[train.set]] <- train.exprs[[train.set]][expr.features, ]
+     }
+
+     if(!is.null(train.genomics[[train.set]])) {
+       train.genomics[[train.set]] <- train.genomics[[train.set]][genomic.features, ,drop=F]
+     }
+
+     if(!is.null(train.clinicals[[train.set]])) {
+       train.clinicals[[train.set]] <- train.clinicals[[train.set]][clinical.features, ,drop=F]
+     }
+
+   }
+
+   if(length(test.set.names) > 0) {
+     for(test.indx in 1:length(test.set.names)) {
+       test.set <- test.set.names[[test.indx]]
+  
+       if(!is.na(test.exprs[[test.set]]) && !is.null(test.exprs[[test.set]])) {
+         test.exprs[[test.set]] <- test.exprs[[test.set]][expr.features, ]
+       }
+  
+       if(!is.null(test.genomics[[test.set]])) {
+         test.genomics[[test.set]] <- test.genomics[[test.set]][genomic.features, ,drop=F]
+       }
+  
+       if(!is.null(test.clinicals[[test.set]])) {
+         test.clinicals[[test.set]] <- test.clinicals[[test.set]][clinical.features, ,drop=F]
+       }
+  
+     }
+   }
+
+   train.expr.sets <- list()
+   for(train.indx in 1:length(train.set.names)) {
+     train.set <- train.set.names[[train.indx]]
+     train.expr.sets[[train.set]] <- list()
+     for(gene.set in names(gene.sets)) {
+       train.expr.sets[[train.set]][[gene.set]] <- train.exprs[[train.set]]
+       if(!(gene.set == "gene") && !is.na(train.exprs[[train.set]]) && !is.null(train.exprs[[train.set]])) { 
+         cat(paste0("Computing GSVA for training set ", train.set, " and gene set ", gene.set, "\n"))
+         suppressPackageStartupMessages(library("GSVA"))
+         train.expr.sets[[train.set]][[gene.set]] <- gsva(as.matrix(train.exprs[[train.set]]), gene.sets[[gene.set]], parallel.sz=num.processes, verbose=TRUE)$es.obs
+       }
+       ## z-score
+       if(z.score.expr && !is.na(train.exprs[[train.set]]) && !is.null(train.exprs[[train.set]])) {
+         train.expr.sets[[train.set]][[gene.set]] <- t(scale(t(train.expr.sets[[train.set]][[gene.set]]), center = TRUE, scale = TRUE))
+       }
+       ## Add the mean of the _z-scored_ responses as a feature (but do not zscore them)
+       if(include.mean.response.as.feature) {
+         y.mean <- (colMeans(train.drcs[[train.set]], na.rm=TRUE))
+         if(!is.na(train.expr.sets[[train.set]][[gene.set]]) && !is.null(train.expr.sets[[train.set]][[gene.set]])) {
+           train.expr.sets[[train.set]][[gene.set]] <- rbind(train.expr.sets[[train.set]][[gene.set]], "mean.resp" = unname(y.mean[colnames(train.expr.sets[[train.set]][[gene.set]])]))
+         } else {
+           train.expr.sets[[train.set]][[gene.set]] <- t(data.frame("dummy" = rep(0,length(y.mean)), "mean.resp" = y.mean))
+           colnames(train.expr.sets[[train.set]][[gene.set]]) <- names(y.mean)
+cat("train\n")
+print(head(y.mean))
+print(head(train.expr.sets[[train.set]][[gene.set]]))
+print(class(train.expr.sets[[train.set]][[gene.set]]))
+         }
+##cat(paste0("mean response train:\n"))
+##print(train.expr.sets[[train.set]][[gene.set]]["mean.resp",])
+       }
+     }
+   }
+
+   test.expr.sets <- list()
+   if(length(test.set.names) > 0) {
+     for(test.indx in 1:length(test.set.names)) {
+       test.set <- test.set.names[[test.indx]]
+       test.expr.sets[[test.set]] <- list()
+       for(gene.set in names(gene.sets)) {
+         test.expr.sets[[test.set]][[gene.set]] <- test.exprs[[test.set]]
+         if(!(gene.set == "gene") && !is.na(test.exprs[[test.set]]) && !is.null(test.exprs[[test.set]])) { 
+           cat(paste0("Computing GSVA for testing set ", test.set, " and gene set ", gene.set, "\n"))
+           test.expr.sets[[test.set]][[gene.set]] <- gsva(as.matrix(test.exprs[[test.set]]), gene.sets[[gene.set]], parallel.sz=num.processes, verbose=TRUE)$es.obs
+         }
+         ## z-score
+         if(z.score.expr && !is.na(test.exprs[[test.set]]) && !is.null(test.exprs[[test.set]])) {
+           test.expr.sets[[test.set]][[gene.set]] <- t(scale(t(test.expr.sets[[test.set]][[gene.set]]), center = TRUE, scale = TRUE))
+         }
+         ## Add the mean of the _z-scored_ responses as a feature (but do not zscore them)
+         if(include.mean.response.as.feature) {
+           y.mean <- (colMeans(test.drcs[[test.set]], na.rm=TRUE))
+           if(!is.na(test.expr.sets[[test.set]][[gene.set]]) && !is.null(test.expr.sets[[test.set]][[gene.set]])) {
+             test.expr.sets[[test.set]][[gene.set]] <- rbind(test.expr.sets[[test.set]][[gene.set]], "mean.resp" = unname(y.mean[colnames(test.expr.sets[[test.set]][[gene.set]])]))
+           } else {
+             test.expr.sets[[test.set]][[gene.set]] <- t(data.frame("dummy" = rep(0,length(y.mean)), "mean.resp" = y.mean))
+             colnames(test.expr.sets[[test.set]][[gene.set]]) <- names(y.mean)
+cat("test\n")
+print(head(y.mean))
+print(head(test.expr.sets[[test.set]][[gene.set]]))
+           }
+cat(paste0("mean response test:\n"))
+print(test.expr.sets[[test.set]][[gene.set]]["mean.resp",])
+         }
+       }
+     }
+   }
+
+   all.comparisons <- list()
+   all.fits <- list()
+   for(train.indx in 1:length(train.set.names)) {
+
+     train.set <- train.set.names[[train.indx]]
+     all.comparisons[[train.set]] <- list()
+     all.fits[[train.set]] <- list()
+
+     if(length(test.set.names) > 0) {
+       for(test.indx in 1:length(test.set.names)) {
+         test.set <- test.set.names[[test.indx]]
+         all.comparisons[[train.set]][[test.set]] <- list()
+       }
+     }
+
+     for(gene.set in names(gene.sets)) {
+
+       x <- rbind(train.expr.sets[[train.set]][[gene.set]], train.genomics[[train.set]], train.clinicals[[train.set]])
+       cat(paste0("Fitting models for train set ", train.set, " and gene.set ", gene.set, "\n"))
+       fits <- train.model_(x, train.drcs[[train.set]], train.drugs[[train.indx]], seed = seed, use.rf = use.rf, use.svm = use.svm, use.ridge = use.ridge, use.mean = use.mean, alphas = alphas, keep.forest = keep.forest)
+       all.fits[[train.set]][[gene.set]] <- fits
+       rm(x)
+       gc()
+
+       if(length(test.set.names) > 0) {
+         for(test.indx in 1:length(test.set.names)) {
+  
+           test.set <- test.set.names[[test.indx]]
+           cat(paste0("Training on ", train.set, " and testing on ", test.set, " using gene.set ", gene.set, "\n"))
+           newx <- rbind(test.expr.sets[[test.set]][[gene.set]], test.genomics[[test.set]], test.clinicals[[test.set]])
+           all.comparisons[[train.set]][[test.set]][[gene.set]] <- test.model_(fits, drug.name.tbl, train.drug.cols[[train.indx]], x.arg = newx, test.drc = test.drcs[[test.set]], test.drug.cols[[test.indx]], seed = seed, use.rf = use.rf, use.svm = use.svm, use.ridge = use.ridge, use.mean = use.mean, flatten.downsampled.fits = FALSE)
+
+         } ## for(test.indx in 1:length(test.set.names))
+       }
+##       rm(fits)
+##       gc()
+     } ## for(gene.set in names(gene.sets))
+
+   } ## for(train.indx in 1:length(train.set.names)) 
+   return(list("all.comparisons" = all.comparisons, "all.fits" = all.fits))
+}
+
+prepare.train.and.test.crossproduct <- function(gene.sets, drug.name.tbl, train.set.names, train.dss.args, train.expr.args, train.genomic.args, train.clinical.args, train.common.drugs, train.drugs, train.drug.cols, train.patient.cols, train.response.cols, test.set.names, test.dss.args, test.expr.args, test.genomic.args, test.clinical.args, test.common.drugs, test.drug.cols, test.patient.cols, test.response.cols, seed = 1234, use.rf = FALSE, use.svm = FALSE, use.ridge = TRUE, use.mean = TRUE, num.processes = 1, alphas = c(0, 1), include.mean.response.as.feature = FALSE, subtract.mean.response = FALSE, keep.forest = TRUE, z.score.expr = TRUE, z.score.drc = TRUE) {
+
+   train.x <- list()
+   test.x <- list()
+   
+   ## Define the feature spaces for all of the training and test data.  Make sure they are common across all of these data sets. 
+   ## Also sensible might be just that each pairwise train vs test set has the same feature space--but that would not enable
+   ## fair comparisons across training sets.
+   train.drcs <- list()
+   train.exprs <- list()
+   train.genomics <- list()
+   train.clinicals <- list()
+
+   for(train.indx in 1:length(train.set.names)) {
+     train.set <- train.set.names[[train.indx]]
+     cat(paste0("Preparing train set: ", train.set, "\n"))
+     l <- prepare.drug.response.and.expr.matrices(train.dss.args[[train.indx]], train.expr.args[[train.indx]], drugs = train.common.drugs[[train.indx]], 
+                                                  drug.col = train.drug.cols[[train.indx]], patient.col = train.patient.cols[[train.indx]], response.col = train.response.cols[[train.indx]])
+
+     train.drc <- l[["drc.df"]]
+     train.expr <- l[["expr.df"]]
+     train.samples <- colnames(train.drc)
+
+     train.genomic <- train.genomic.args[[train.indx]]
+
+     if(!is.null(train.genomic)) {
+       train.samples <- intersect(train.samples, colnames(train.genomic))
+     }
+
+     train.clinical <- train.clinical.args[[train.indx]]
+
+     if(!is.null(train.clinical)) {
+       train.samples <- intersect(train.samples, colnames(train.clinical))
+     }
+
      if(!is.null(train.expr)) {
        train.samples <- intersect(train.samples, colnames(train.expr))
      }
@@ -1607,6 +2410,7 @@ train.and.test.crossproduct <- function(gene.sets, drug.name.tbl, train.set.name
 
      ## Subtract off the mean response _before_ z-scoring
      if(subtract.mean.response) {
+       cat("Subtracting mean response\n")
        train.drc.mean <- unname(colMeans(train.drc, na.rm=TRUE))
        train.drc <- train.drc - matrix(train.drc.mean, nrow=nrow(train.drc), ncol=ncol(train.drc), byrow=TRUE)
      }
@@ -1783,8 +2587,8 @@ train.and.test.crossproduct <- function(gene.sets, drug.name.tbl, train.set.name
        if(include.mean.response.as.feature) {
          y.mean <- (colMeans(train.drcs[[train.set]], na.rm=TRUE))
          train.expr.sets[[train.set]][[gene.set]] <- rbind(train.expr.sets[[train.set]][[gene.set]], "mean.resp" = unname(y.mean[colnames(train.expr.sets[[train.set]][[gene.set]])]))
-cat(paste0("mean response train:\n"))
-print(train.expr.sets[[train.set]][[gene.set]]["mean.resp",])
+##cat(paste0("mean response train:\n"))
+##print(train.expr.sets[[train.set]][[gene.set]]["mean.resp",])
        }
      }
    }
@@ -1810,11 +2614,43 @@ print(train.expr.sets[[train.set]][[gene.set]]["mean.resp",])
            y.mean <- (colMeans(test.drcs[[test.set]], na.rm=TRUE))
            test.expr.sets[[test.set]][[gene.set]] <- rbind(test.expr.sets[[test.set]][[gene.set]], "mean.resp" = unname(y.mean[colnames(test.expr.sets[[test.set]][[gene.set]])]))
 cat(paste0("mean response test:\n"))
-print(test.expr.sets[[train.set]][[gene.set]]["mean.resp",])
+print(test.expr.sets[[test.set]][[gene.set]]["mean.resp",])
          }
        }
      }
    }
+
+   all.comparisons <- list()
+   all.fits <- list()
+   for(train.indx in 1:length(train.set.names)) {
+
+     train.set <- train.set.names[[train.indx]]
+     train.x[[train.set]] <- list()
+
+     for(gene.set in names(gene.sets)) {
+
+       x <- rbind(train.expr.sets[[train.set]][[gene.set]], train.genomics[[train.set]], train.clinicals[[train.set]])
+       train.x[[train.set]][[gene.set]] <- x
+
+     }
+   }
+
+   if(length(test.set.names) > 0) {
+     for(test.indx in 1:length(test.set.names)) {
+       test.set <- test.set.names[[test.indx]]
+       test.x[[test.set]] <- list()
+
+       for(gene.set in names(gene.sets)) {
+         newx <- rbind(test.expr.sets[[test.set]][[gene.set]], test.genomics[[test.set]], test.clinicals[[test.set]])
+         test.x[[test.set]][[gene.set]] <- newx
+       }
+     }
+   }
+
+   return(list("train.x" = train.x, "train.drcs" = train.drcs, "test.x" = test.x, "test.drcs" = test.drcs))
+}
+
+train.and.test.crossproduct_ <- function(gene.sets, drug.name.tbl, train.set.names, train.y, train.x, train.drugs, train.drug.cols, test.set.names, test.y, test.x, test.drug.cols, seed = 1234, use.rf = FALSE, use.svm = FALSE, use.ridge = TRUE, use.mean = TRUE, num.processes = 1, alphas = c(0, 1), keep.forest = TRUE, use.glmnet.intercept = TRUE) {
 
    all.comparisons <- list()
    all.fits <- list()
@@ -1833,9 +2669,9 @@ print(test.expr.sets[[train.set]][[gene.set]]["mean.resp",])
 
      for(gene.set in names(gene.sets)) {
 
-       x <- rbind(train.expr.sets[[train.set]][[gene.set]], train.genomics[[train.set]], train.clinicals[[train.set]])
+       x <- train.x[[train.set]][[gene.set]]
        cat(paste0("Fitting models for train set ", train.set, " and gene.set ", gene.set, "\n"))
-       fits <- train.model_(x, train.drcs[[train.set]], train.drugs[[train.indx]], seed = seed, use.rf = use.rf, use.svm = use.svm, use.ridge = use.ridge, use.mean = use.mean, alphas = alphas, keep.forest = keep.forest)
+       fits <- train.model_(x, train.y[[train.set]], train.drugs[[train.indx]], seed = seed, use.rf = use.rf, use.svm = use.svm, use.ridge = use.ridge, use.mean = use.mean, alphas = alphas, keep.forest = keep.forest, use.glmnet.intercept = use.glmnet.intercept)
        all.fits[[train.set]][[gene.set]] <- fits
        rm(x)
        gc()
@@ -1845,8 +2681,8 @@ print(test.expr.sets[[train.set]][[gene.set]]["mean.resp",])
   
            test.set <- test.set.names[[test.indx]]
            cat(paste0("Training on ", train.set, " and testing on ", test.set, " using gene.set ", gene.set, "\n"))
-           newx <- rbind(test.expr.sets[[test.set]][[gene.set]], test.genomics[[test.set]], test.clinicals[[test.set]])
-           all.comparisons[[train.set]][[test.set]][[gene.set]] <- test.model_(fits, drug.name.tbl, train.drug.cols[[train.indx]], x.arg = newx, test.drc = test.drcs[[test.set]], test.drug.cols[[test.indx]], seed = seed, use.rf = use.rf, use.svm = use.svm, use.ridge = use.ridge, use.mean = use.mean, flatten.downsampled.fits = FALSE)
+           newx <- test.x[[test.set]][[gene.set]]
+           all.comparisons[[train.set]][[test.set]][[gene.set]] <- test.model_(fits, drug.name.tbl, train.drug.cols[[train.indx]], x.arg = newx, test.drc = test.y[[test.set]], test.drug.cols[[test.indx]], seed = seed, use.rf = use.rf, use.svm = use.svm, use.ridge = use.ridge, use.mean = use.mean, flatten.downsampled.fits = FALSE)
 
          } ## for(test.indx in 1:length(test.set.names))
        }
@@ -2175,13 +3011,13 @@ train.model.with.downsampling <- function(train.dss.arg, train.expr.arg, train.g
    train.drc <- train.drc[, train.samples]
 
    if(!is.null(train.genomic)) {
-     train.genomic <- train.genomic[, train.samples]
+     train.genomic <- train.genomic[, train.samples, drop = FALSE]
    }
    if(!is.null(train.clinical)) {
-     train.clinical <- train.clinical[, train.samples]
+     train.clinical <- train.clinical[, train.samples, drop = FALSE]
    }
    if(!is.null(train.expr)) {
-     train.expr <- train.expr[, train.samples]
+     train.expr <- train.expr[, train.samples, drop = FALSE]
    }
 
    z.score.drc <- TRUE
@@ -2207,9 +3043,9 @@ train.model.with.downsampling <- function(train.dss.arg, train.expr.arg, train.g
                                         t.expr <- train.expr
                                         t.genomic <- train.genomic
                                         t.clinical <- train.clinical
-                                        if(!is.null(t.expr)) { t.expr <- t.expr[, !flag] }
-                                        if(!is.null(t.genomic)) { t.genomic <- t.genomic[, !flag] }
-                                        if(!is.null(t.clinical)) { t.clinical <- t.clinical[, !flag] }
+                                        if(!is.null(t.expr)) { t.expr <- t.expr[, !flag, drop = FALSE] }
+                                        if(!is.null(t.genomic)) { t.genomic <- t.genomic[, !flag, drop = FALSE] }
+                                        if(!is.null(t.clinical)) { t.clinical <- t.clinical[, !flag, drop = FALSE] }
 
                                         set.seed(iter)
                                         n.samples <- num.samples.per.drug[num.samples.per.drug[, train.drug.col] == as.character(train.drug), "num.samples"]
@@ -2219,9 +3055,9 @@ train.model.with.downsampling <- function(train.dss.arg, train.expr.arg, train.g
                                         }
                                         indices <- sample.int(length(y), size = n.samples, replace = with.replacement)
                                         y <- y[indices]
-                                        if(!is.null(t.expr)) { t.expr <- t.expr[, indices] }
-                                        if(!is.null(t.genomic)) { t.genomic <- t.genomic[, indices] }
-                                        if(!is.null(t.clinical)) { t.clinical <- t.clinical[, indices] }
+                                        if(!is.null(t.expr)) { t.expr <- t.expr[, indices, drop = FALSE] }
+                                        if(!is.null(t.genomic)) { t.genomic <- t.genomic[, indices, drop = FALSE] }
+                                        if(!is.null(t.clinical)) { t.clinical <- t.clinical[, indices, drop = FALSE] }
 
                                         if(z.score.drc) {
                                           y <- (y - mean(y)) / sd(y)
@@ -2642,6 +3478,46 @@ extract.features <- function(ret, s = "lambda.min") {
                       ret <- data.frame(train.drug = df$train.drug, alpha = df$alpha, model = df$model, n.train = df$n.train, features = "")
                       if((df$model != "glmnet")) { return(ret) }
                       if(as.numeric(df$alpha) != 1) { return(ret) }
+                      if(is.null(df$fit) || is.na(df$fit)) { return(ret) }
+                      coeffs <- NULL
+                      switch(df$model,
+                        "glmnet" = {
+                          coeffs <- coefficients(df$fit, s = s)
+                        },
+                        "rf" = {
+                          col <- colnames(importance(df$fit))[1]
+                          ## NB: %IncMSE = [ mse(j) - mse0 ] / mse0 * 100  [ mse(j): permuted; mse0: original MSE ]
+                          ## i.e., larger/more positive %IncMSE is better
+                          if(!grepl(col, pattern="IncMSE")) { stop(paste0("Was expected ", col, " to be %IncMSE\n")) }
+                          coeffs <- importance(df$fit)[,1,drop=FALSE]
+                        },
+                        { stop(paste0("Unknown model ", df$model, "\n")) })
+                                         ns <- rownames(coeffs)
+                                         coeffs <- as.vector(coeffs)
+                                         names(coeffs) <- ns
+                                         coeffs <- coeffs[!grepl(pattern="Intercept", names(coeffs))]
+                                         coeffs <- coeffs[coeffs != 0]
+                                         n.features <- length(coeffs) 
+                                         coeffs <- coeffs[order(names(coeffs))]
+                                         coeff.vals <- paste(coeffs, collapse=",")
+                                         coeffs <- paste(names(coeffs), collapse=",")
+
+                      ret$features <- coeffs
+                      ret
+                    }) })
+  tbl$model <- as.character(tbl$model)
+  tbl[(tbl$model == "glmnet") & (tbl$alpha == 0),"model"] <- "ridge"
+  tbl[(tbl$model == "glmnet") & (tbl$alpha == 1),"model"] <- "lasso"
+  tbl
+}
+
+extract.all.features <- function(ret, s = "lambda.min") {
+  tbl <-
+     ldply(ret,
+             .fun = function(foo) {
+                ldply(foo,
+             .fun = function(df) {
+                      ret <- data.frame(train.drug = df$train.drug, alpha = df$alpha, model = df$model, n.train = df$n.train, features = "")
                       if(is.null(df$fit) || is.na(df$fit)) { return(ret) }
                       coeffs <- NULL
                       switch(df$model,

@@ -34,6 +34,8 @@ source("../common/data-preprocessing.R")
 source("../common/models.R")
 source("../common/plotting.R")
 source("../common/utils.R")
+source("../common/drug-mapping-functions/mapping_helpers.R")
+source("../common/drug-mapping-functions/drug_mapping.R")
 
 ## Register parallelization
 num.cores <- detectCores()
@@ -52,6 +54,16 @@ synapseLogin()
 ## Purpose:
 ## This file models 2 data sets (OHSU and FIMM)
 source("fimm-ohsu-setup-120817.R")
+
+if(TRUE) {
+## Overwrite the expression synIds to exclude outliers (as before), but _not_ to restrict to highly variable/cancer genes
+## Batch-corrected log2 cpm (or rma) expression files (NB: these exclude 2 outliers in OHSU)
+data.set.expr.synIds <- list("ohsu" = "syn11362256", "fimm" = "syn11362257")
+## names(data.set.expr.synIds) <- data.sets
+expr.folder.synIds <- list("ohsu" = "syn11361089", "fimm" = "syn11361089")
+data.set.expr.files <- list("ohsu" = "ohsu-expr-fimm-ohsu-outlier1-combat.tsv", "fimm" = "fimm-expr-fimm-ohsu-outlier1-combat.tsv")
+}
+
 file.prefix <- "fimm-ohsu-overlap-120817"
 rdata.file <- ".Rdata.overlap.120817"
 
@@ -134,6 +146,19 @@ for(ds in names(fits)) {
 ## Limit the drug map to common drugs (which, by design of the drug map file, should already be the case)
 drug.name.tbl <- drug.map[drug.map[, drug.name.col] %in% common.drugs,]
 
+cat("Translating symbols\n")
+
+drug.name.tbl$Ensg.Targets <- unlist(lapply(drug.name.tbl$Gene.Targets,
+                                            function(str) {
+                                              if(is.na(str) || (str == "")) { return(NA) }
+                                              symbols <- unlist(strsplit(as.character(str), ",[ ]*"))
+                                              ensg.genes <- symbols.to.ensg.mapping(symbols)
+                                              ensg.genes <- ensg.genes$ensg[!is.na(ensg.genes$ensg)]
+                                              if(length(ensg.genes) == 0) { return(NA) }
+                                              paste(ensg.genes, collapse=", ")
+                                            }))
+cat("Done translating symbols\n")
+
 common.drugs.by.data.set <- list()
 for(ds in names(fits)) {
   common.drugs.by.data.set[[ds]] <- drug.name.tbl[, drug.name.col]
@@ -169,11 +194,137 @@ for(nm in names(exprs)) {
 }
 
 common.genes <- Reduce("intersect", lapply(exprs, rownames))
-## common.genes <- intersect(common.genes, gene.subset)
+
+use.subset <- TRUE
+if(use.subset) {
+aml.logsdon.gene.tbl <- openxlsx:::read.xlsx("../common-resources/41467_2017_2465_MOESM7_ESM.xlsx", sheet = 1, startRow = 3)
+aml.logsdon.gene.tbl <- aml.logsdon.gene.tbl[order(as.numeric(aml.logsdon.gene.tbl$SCORE), decreasing=TRUE),]
+## Take the top 2000, even though the plateau in scores is around 3000
+aml.logsdon.genes <- unique(aml.logsdon.gene.tbl$GENE[1:500])
+aml.logsdon.genes <- symbols.to.ensg.mapping(aml.logsdon.genes)
+aml.logsdon.genes <- na.omit(aml.logsdon.genes$ensg)
+
+## Take all Cancer genes, not just those with Cancer Type == LAML or confidence = A (High), B (Medium), or C (low)
+cancer.genes <- openxlsx::read.xlsx("../common-resources/TableS2A.xlsx", sheet = 1, startRow = 3)
+cancer.genes <- unique(cancer.genes$Gene)
+cancer.genes <- symbols.to.ensg.mapping(cancer.genes)
+cancer.genes <- na.omit(cancer.genes$ensg)
+
+## From Suleiman and Ammad
+genes <- read.table("../common-resources/gene_names.tsv", sep="\t", header=FALSE, stringsAsFactors = FALSE)$V1
+gene.subset <- genes[grepl(genes, pattern="ENSG")]
+genes.to.translate <- genes[!grepl(genes, pattern="ENSG")]
+trns <- symbols.to.ensg.mapping(genes.to.translate)
+gene.subset <- unique(c(gene.subset, trns$ensg))
+
+## Include target genes as annotated by FIMM 
+
+## Include target genes as provided by Robert in his database.
+## Load in the drug structure annotations provided by Robert
+drug.structures.tbl <- read.table("../common/drug-mapping-functions/drug_structures.txt", comment.char="", sep="\t", header=TRUE, as.is=TRUE)
+foo <- getGenesfromDrugs(drug.structures.tbl$drug, drug.structures.tbl$smiles, tanimoto_threshold = 0.95, parallelized = F)
+evo.ensg.targets <- symbols.to.ensg.mapping(foo$Hugo_Gene)
+evo.ensg.targets <- evo.ensg.targets$ensg
+
+old.nrow <- nrow(drug.name.tbl)
+m <- merge(drug.name.tbl, drug.structures.tbl, by.x = "FIMM_DRUG_NAME", by.y = "drug")
+print(nrow(m))
+if(old.nrow != nrow(m)) {
+  stop("Size of drug name table changed when merging in structure info\n")
+}
+drug.name.tbl <- m
+
+print(length(aml.logsdon.genes))
+print(length(cancer.genes))
+print(length(gene.subset))
+
+cat("Adding Suleiman/Ammad genes\n")
+cat(paste0("Length of genes: ", length(gene.subset), "\n"))
+
+cat("Adding cancer genes\n")
+gene.subset <- unique(union(cancer.genes, gene.subset))
+
+cat("Adding Logsdon genes\n")
+gene.subset <- unique(union(aml.logsdon.genes, gene.subset))
+
+## Include target genes as annotated by FIMM 
+all.ensg.targets <- unlist(llply(drug.name.tbl$Ensg.Targets, .fun = function(str) unlist(strsplit(str, split=",[ ]*"))))
+all.ensg.targets <- na.omit(all.ensg.targets)
+all.ensg.targets <- unique(all.ensg.targets)
+
+cat(paste0("Length of genes: ", length(gene.subset), "\n"))
+cat("Adding FIMM-annotated gene targets\n")
+gene.subset <- unique(union(gene.subset, all.ensg.targets))
+cat(paste0("Length of genes: ", length(gene.subset), "\n"))
+
+cat(paste0("Adding evo-annotated gene targets\n"))
+gene.subset <- unique(union(gene.subset, evo.ensg.targets))
+cat(paste0("Length of genes: ", length(gene.subset), "\n"))
+
+## This is too large
+##dgidb.tbl <- read.table("../common/dgidb_genes.tsv", sep="\t", header=TRUE, as.is=TRUE)
+##dgidb.ensg.targets <- dgidb.tbl$gene_claim_name
+##dgidb.ensg.targets <- dgidb.ensg.targets[!is.na(dgidb.ensg.targets)]
+##dgidb.ensg.targets <- unique(dgidb.ensg.targets[grepl(dgidb.ensg.targets, pattern="ENSG")])
+
+##cat(paste0("Adding all dgiDB gene targets\n"))
+##gene.subset <- unique(union(gene.subset, dgidb.ensg.targets))
+##cat(paste0("Length of genes: ", length(gene.subset), "\n"))
+}
+
+if(use.subset) {
+  common.genes <- intersect(common.genes, gene.subset)
+}
+cat(paste0("Length of genes: ", length(common.genes), "\n"))
+
+## Download biocarta, kegg, reactome, and hallmark data sets that have been translated to ensembl ids
+
+## Hallmark gene sets: The list in this R object is called hallmark.gene.sets
+synId <- "syn10644516"
+load(getFileLocation(synGet(synId)))
+
+## KEGG gene sets: The list in this R object is called kegg.gene.sets
+synId <- "syn10644519"
+load(getFileLocation(synGet(synId)))
+
+## Biocarta gene sets: The list in this R object is called biocarta.gene.sets
+synId <- "syn10644517"
+load(getFileLocation(synGet(synId)))
+
+## Reactome gene sets: The list in this R object is called reactome.gene.sets
+synId <- "syn10644520"
+load(getFileLocation(synGet(synId)))
+
+## Do analysis at pathway- (hallmark, biocarta, kegg, and reactome) as well as at gene-level
+gene.sets <- list("gene" = "gene", "kegg" = kegg.gene.sets, "hallmark" = hallmark.gene.sets, "biocarta" = biocarta.gene.sets, "reactome" = reactome.gene.sets)
+## Do analysis only at gene-level
+## gene.sets <- list("gene" = "gene")
+
+save(common.genes, file="common.genes.Rd")
+print(head(common.genes))
+cat("Begin query\n")
+baz <- queryMany(common.genes, scopes="ensembl.gene", fields=c("symbol","go"), species="human")
+indices <- 1:nrow(baz)
+names(indices) <- baz$query
+term.types <- c("go.BP", "go.CC", "go.MF")
+names(term.types) <- term.types
+cat("End query\n")
+ensg.to.pathway.list <- llply(term.types, .fun = function(col) {
+                              llply(indices, .fun = function(indx) { 
+                                unlist(lapply(baz[indx,col], function(df) df$term)) }) })
+for(nm in names(gene.sets)[names(gene.sets) != "gene"]) {
+  cat(paste0("Invert ", nm, "\n"))
+  ensg.to.pathway.list[[nm]] <- invert.list(gene.sets[[nm]])
+  cat(paste0("End invert ", nm, "\n"))
+}
+
+save.image("image.Rd")
 
 ## Restrict the matrices to those genes in common across data sets
 for(ds in names(fits)) {
+  cat(paste0("Subset ", ds, "\n"))
   exprs[[ds]] <- exprs[[ds]][common.genes, ]
+  cat(paste0("End subset ", ds, "\n"))
 }
 
 ## Sanity check: compare Sanger and CTRP drug AUC and IC50 values.
@@ -215,30 +366,8 @@ if(("sanger" %in% names(fits)) && ("ctrp" %in% names(fits))) {
   }
 }
 
-## Download biocarta, kegg, reactome, and hallmark data sets that have been translated to ensembl ids
-
-## Hallmark gene sets: The list in this R object is called hallmark.gene.sets
-synId <- "syn10644516"
-load(getFileLocation(synGet(synId)))
-
-## KEGG gene sets: The list in this R object is called kegg.gene.sets
-synId <- "syn10644519"
-load(getFileLocation(synGet(synId)))
-
-## Biocarta gene sets: The list in this R object is called biocarta.gene.sets
-synId <- "syn10644517"
-load(getFileLocation(synGet(synId)))
-
-## Reactome gene sets: The list in this R object is called reactome.gene.sets
-synId <- "syn10644520"
-load(getFileLocation(synGet(synId)))
-
 ## BEGIN modeling setup
 
-## Do analysis at pathway- (hallmark, biocarta, kegg, and reactome) as well as at gene-level
-gene.sets <- list("gene" = "gene", "hallmark" = hallmark.gene.sets, "biocarta" = biocarta.gene.sets, "kegg" = kegg.gene.sets, "reactome" = reactome.gene.sets)
-## Do analysis only at gene-level
-## gene.sets <- list("gene" = "gene")
 
 ## Filter the gene expression data to restrict to highly-expressed genes
 expr.filt.matrices <- exprs
@@ -310,7 +439,7 @@ if(ds %in% data.sets.to.analyze) {
   half.index <- createDataPartition(fits[[ds]][, data.set.drug.id.cols[[ds]]], p = .5, list = FALSE)
   fits.set1 <- fits[[ds]][half.index, ]
   fits.set2 <- fits[[ds]][-half.index, ]
-
+if(FALSE) {
   nxt.indx <- length(train.set.names) + 1
   train.set.names[[nxt.indx]] <- "ohsu.set1"
   train.dss.args[[nxt.indx]] <- fits.set1
@@ -345,7 +474,7 @@ if(ds %in% data.sets.to.analyze) {
   test.drug.cols[[nxt.indx]] <- drug.name.col
   test.patient.cols[[nxt.indx]] <- expr.patient.id.cols[[ds]]
   test.response.cols[[nxt.indx]] <- "dss.auc.ll4"
-
+}
 
 } ## if("ohsu" %in% data.sets.to.analyze) 
 
@@ -559,22 +688,81 @@ if(do.downsampling) {
                                          num.train.samples.per.drug = num.train.samples.per.drug, num.test.samples.per.drug = num.test.samples.per.drug,
                                          num.iterations = 100, with.replacement = FALSE, return.fits = FALSE) 
 } else { 
+  cat("Modeling mean response\n")
+  mean.response.train.clinical.args <- train.clinical.args
+  ## Read in the modeled mean response
+  for(idx in 1:length(mean.response.train.clinical.args)) {
+    nm1 <- train.set.names[[idx]]
+    nm2 <- nm1
+    mean.resp.file <- paste0("fimm-ohsu-validate-trained-models-112217-one-ohsu-no-filtering-all-mean-response-", nm1, "-vs-", nm2, "-ridge-gene-prediction.tsv")
+    mean.resp.file <- paste0("fimm-ohsu-validate-trained-models-112217-one-ohsu-no-filtering-all-mean-response-", nm1, "-vs-", nm2, "-rf-gene-prediction.tsv")
+    mean.resp.file <- paste0("fimm-ohsu-validate-trained-models-112217-one-ohsu-no-filtering-all-mean-response-", nm1, "-vs-", nm2, "-lasso-gene-prediction.tsv")
+    print(mean.resp.file)
+    mean.resp <- read.table(file = mean.resp.file, sep="\t", header=TRUE)
+    if(grepl(nm2, pattern="ohsu")) {
+      ## Convert the column names from X20.00347 to 20-00347
+##      colnames(mean.resp) <- gsub("X(.*)\\.(.*)", "\\1-\\2", colnames(mean.resp))
+    }
+    rownames(mean.resp) <- "mean.resp"
+    mean.response.train.clinical.args[[idx]] <- mean.resp
+  }
+
+  mean.response.test.clinical.args <- test.clinical.args
+  ## Read in the modeled mean response
+  for(idx in 1:length(mean.response.test.clinical.args)) {
+    nm2 <- test.set.names[[idx]]
+    nm1 <- "ohsu"
+##    nm1 <- nm2
+    mean.resp.file <- paste0("fimm-ohsu-validate-trained-models-112217-one-ohsu-no-filtering-all-mean-response-", nm1, "-vs-", nm2, "-ridge-gene-prediction.tsv")
+    mean.resp.file <- paste0("fimm-ohsu-validate-trained-models-112217-one-ohsu-no-filtering-all-mean-response-", nm1, "-vs-", nm2, "-rf-gene-prediction.tsv")
+    mean.resp.file <- paste0("fimm-ohsu-validate-trained-models-112217-one-ohsu-no-filtering-all-mean-response-", nm1, "-vs-", nm2, "-lasso-gene-prediction.tsv")
+    print(mean.resp.file)
+    mean.resp <- read.table(file = mean.resp.file, sep="\t", header=TRUE)
+    if(grepl(nm2, pattern="ohsu")) {
+      ## Convert the column names from X20.00347 to 20-00347
+##      colnames(mean.resp) <- gsub("X(.*)\\.(.*)", "\\1-\\2", colnames(mean.resp))
+    }
+    rownames(mean.resp) <- "mean.resp"
+    mean.response.test.clinical.args[[idx]] <- mean.resp
+  }
+
+  res.aucs[["model.mean.feature"]] <- train.and.test.crossproduct(gene.sets = gene.sets, drug.name.tbl = drug.name.tbl, train.set.names = train.set.names, train.dss.args = train.dss.args, 
+                                         train.expr.args = train.expr.args, train.genomic.args = train.genomic.args, train.clinical.args = mean.response.train.clinical.args, 
+                                         train.common.drugs = train.common.drugs, train.drugs = train.drugs, train.drug.cols = train.drug.cols, train.patient.cols = train.patient.cols, 
+                                         train.response.cols = train.response.cols, test.set.names = test.set.names, test.dss.args = test.dss.args, test.expr.args = test.expr.args, 
+                                         test.genomic.args = test.genomic.args, test.clinical.args = mean.response.test.clinical.args, test.common.drugs = test.common.drugs,
+                                         test.drug.cols = test.drug.cols, test.patient.cols = test.patient.cols, test.response.cols = test.response.cols, 
+                                         seed = 1234, use.rf = TRUE, use.svm = FALSE, use.mean = FALSE, num.processes = num.processes, alphas = c(0, 1), include.mean.response.as.feature = FALSE,
+                                         subtract.mean.response = FALSE, keep.forest = TRUE)
+
+
   set.seed(1234)
   random.train.expr.args <- train.expr.args
   for(nm in 1:length(random.train.expr.args)) {
-    indices <- sample.int(ncol(random.train.expr.args[[nm]]))
-    samples <- colnames(random.train.expr.args[[nm]])
-    random.train.expr.args[[nm]] <- random.train.expr.args[[nm]][, indices]
-    colnames(random.train.expr.args[[nm]]) <- samples
+    shuffle.samples <- FALSE
+    if(shuffle.samples) {
+      cat(paste0("Shuffling samples for ", train.set.names[[nm]], "\n"))
+      indices <- sample.int(ncol(random.train.expr.args[[nm]]))
+      samples <- colnames(random.train.expr.args[[nm]])
+      random.train.expr.args[[nm]] <- random.train.expr.args[[nm]][, indices]
+      colnames(random.train.expr.args[[nm]]) <- samples
+    } else {
+      cat(paste0("Shuffling genes for ", train.set.names[[nm]], "\n"))
+      indices <- sample.int(nrow(random.train.expr.args[[nm]]))
+      genes <- rownames(random.train.expr.args[[nm]])
+      random.train.expr.args[[nm]] <- random.train.expr.args[[nm]][indices, ]
+      rownames(random.train.expr.args[[nm]]) <- genes
+    }
   }
-  res.aucs[["random"]] <- train.and.test.crossproduct(gene.sets = gene.sets, drug.name.tbl = drug.name.tbl, train.set.names = train.set.names, train.dss.args = train.dss.args, 
+  random.train.dss.args <- train.dss.args
+  res.aucs[["random"]] <- train.and.test.crossproduct(gene.sets = gene.sets, drug.name.tbl = drug.name.tbl, train.set.names = train.set.names, train.dss.args = random.train.dss.args, 
                                          train.expr.args = random.train.expr.args, train.genomic.args = train.genomic.args, train.clinical.args = train.clinical.args, 
                                          train.common.drugs = train.common.drugs, train.drugs = train.drugs, train.drug.cols = train.drug.cols, train.patient.cols = train.patient.cols, 
                                          train.response.cols = train.response.cols, test.set.names = test.set.names, test.dss.args = test.dss.args, test.expr.args = test.expr.args, 
                                          test.genomic.args = test.genomic.args, test.clinical.args = test.clinical.args, test.common.drugs = test.common.drugs,
                                          test.drug.cols = test.drug.cols, test.patient.cols = test.patient.cols, test.response.cols = test.response.cols, 
                                          seed = 1234, use.rf = TRUE, use.svm = FALSE, use.mean = FALSE, num.processes = num.processes, alphas = c(0, 1), include.mean.response.as.feature = FALSE,
-                                         subtract.mean.response = TRUE, keep.forest = TRUE)
+                                         subtract.mean.response = FALSE, keep.forest = TRUE)
 
   cat("Subtracting mean response\n")
   res.aucs[["subtract.mean"]] <- train.and.test.crossproduct(gene.sets = gene.sets, drug.name.tbl = drug.name.tbl, train.set.names = train.set.names, train.dss.args = train.dss.args, 
@@ -585,6 +773,7 @@ if(do.downsampling) {
                                          test.drug.cols = test.drug.cols, test.patient.cols = test.patient.cols, test.response.cols = test.response.cols, 
                                          seed = 1234, use.rf = TRUE, use.svm = FALSE, use.mean = FALSE, num.processes = num.processes, alphas = c(0, 1), include.mean.response.as.feature = FALSE,
                                          subtract.mean.response = TRUE, keep.forest = TRUE)
+
   cat("Including mean response\n")
   res.aucs[["mean.feature"]] <- train.and.test.crossproduct(gene.sets = gene.sets, drug.name.tbl = drug.name.tbl, train.set.names = train.set.names, train.dss.args = train.dss.args, 
                                          train.expr.args = train.expr.args, train.genomic.args = train.genomic.args, train.clinical.args = train.clinical.args, 
@@ -631,6 +820,10 @@ for(gset in names(gene.sets)[names(gene.sets) != "gene"]) {
 }
 
 
+cat(paste0("Saving rdata file: ", rdata.file, "\n"))
+save.image(rdata.file)
+
+cat("Sourcing foo\n")
 source("foo.R")
 
 

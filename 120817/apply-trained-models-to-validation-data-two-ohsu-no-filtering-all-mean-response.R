@@ -36,8 +36,6 @@ source("../common/models.R")
 source("../common/plotting.R")
 source("../common/utils.R")
 source("heatmap-utils.R")
-source("../common/drug-mapping-functions/mapping_helpers.R")
-source("../common/drug-mapping-functions/drug_mapping.R")
 
 ## Register parallelization
 num.cores <- detectCores()
@@ -51,27 +49,15 @@ num.processes <- num.cores - 1
 ## Begin setup (this will need to be changed as the data sets in the intersection change)
 
 source("fimm-ohsu-setup-120817.R")
-
-if(TRUE) {
-## Overwrite the expression synIds to exclude outliers (as before), but _not_ to restrict to highly variable/cancer genes
-## Batch-corrected log2 cpm (or rma) expression files (NB: these exclude 2 outliers in OHSU)
-data.set.expr.synIds <- list("ohsu" = "syn11362256", "fimm" = "syn11362257")
-## names(data.set.expr.synIds) <- data.sets
-expr.folder.synIds <- list("ohsu" = "syn11361089", "fimm" = "syn11361089")
-data.set.expr.files <- list("ohsu" = "ohsu-expr-fimm-ohsu-outlier1-combat.tsv", "fimm" = "fimm-expr-fimm-ohsu-outlier1-combat.tsv")
-}
-
 rdata.file <- ".Rdata.validate.120817.one.ohsu.no.filtering.all.mean.response"
 
 ## Over-write some of the variables
 ## These fit files are assumed to be for AUCs/DSS values calculated across shared concentration ranges across data sets.
 ## These files may be created by a script such as
 ## calculate-dss-fimm-ohsu.R
-if(FALSE) {
 data.set.dss.fit.synIds <- c("syn11362885", "syn11362891")
 names(data.set.dss.fit.synIds) <- data.sets
 data.set.dss.fit.files <- c("ohsu-fimm-ohsu-outlier1-dss-t0.tsv", "fimm-fimm-ohsu-outlier1-dss-t0.tsv")
-}
 
 ## A string that will be included in any output files.
 file.prefix <- "fimm-ohsu-validate-trained-models-112217-one-ohsu-no-filtering-all-mean-response"
@@ -144,7 +130,7 @@ for(i in 1:length(fits)) {
 cat(paste0("Number of drugs in common: ", length(unique(common.drugs)), "\n"))
 
 ## Drop any fits that are flagged as outliers
-if(TRUE) {
+if(FALSE) {
 fct.postfixes <- list("LL.4" = ".ll4", "L.4" = ".l4")
 fct <- "LL.4"
 for(ds in names(fits)) {
@@ -159,20 +145,6 @@ for(ds in names(fits)) {
 
 ## Limit the drug map to common drugs (which, by design of the drug map file, should already be the case)
 drug.name.tbl <- drug.map[drug.map[, drug.name.col] %in% common.drugs,]
-
-drug.name.tbl$Ensg.Targets <- unlist(lapply(drug.name.tbl$Gene.Targets,
-                                            function(str) {
-                                              if(is.na(str) || (str == "")) { return(NA) }
-                                              symbols <- unlist(strsplit(as.character(str), ",[ ]*"))
-                                              ensg.genes <- symbols.to.ensg.mapping(symbols)
-                                              ensg.genes <- ensg.genes$ensg[!is.na(ensg.genes$ensg)]
-                                              if(length(ensg.genes) == 0) { return(NA) }
-                                              paste(ensg.genes, collapse=", ")
-                                            }))
-
-all.ensg.targets <- unlist(llply(drug.name.tbl$Ensg.Targets, .fun = function(str) unlist(strsplit(str, split=",[ ]*"))))
-all.ensg.targets <- na.omit(all.ensg.targets)
-all.ensg.targets <- unique(all.ensg.targets)
 
 file <- paste0(file.prefix, "-drug-name-tbl.tsv")
 write.table(file = file, drug.name.tbl, row.names = FALSE, col.names = TRUE, quote = FALSE, sep = "\t")
@@ -217,37 +189,6 @@ for(nm in names(exprs)) {
 }
 
 common.genes <- Reduce("intersect", lapply(exprs, rownames))
-
-use.subset <- TRUE
-if(use.subset) {
-aml.logsdon.gene.tbl <- openxlsx:::read.xlsx("../common-resources/41467_2017_2465_MOESM7_ESM.xlsx", sheet = 1, startRow = 3)
-aml.logsdon.gene.tbl <- aml.logsdon.gene.tbl[order(as.numeric(aml.logsdon.gene.tbl$SCORE), decreasing=TRUE),]
-## Take the top 2000, even though the plateau in scores is around 3000
-aml.logsdon.genes <- unique(aml.logsdon.gene.tbl$GENE[1:500])
-aml.logsdon.genes <- symbols.to.ensg.mapping(aml.logsdon.genes)
-aml.logsdon.genes <- na.omit(aml.logsdon.genes$ensg)
-
-## Take all Cancer genes, not just those with Cancer Type == LAML or confidence = A (High), B (Medium), or C (low)
-cancer.genes <- openxlsx::read.xlsx("../common-resources/TableS2A.xlsx", sheet = 1, startRow = 3)
-cancer.genes <- unique(cancer.genes$Gene)
-cancer.genes <- symbols.to.ensg.mapping(cancer.genes)
-cancer.genes <- na.omit(cancer.genes$ensg)
-
-## From Suleiman and Ammad
-genes <- read.table("../common-resources/gene_names.tsv", sep="\t", header=FALSE, stringsAsFactors = FALSE)$V1
-gene.subset <- genes[grepl(genes, pattern="ENSG")]
-genes.to.translate <- genes[!grepl(genes, pattern="ENSG")]
-trns <- symbols.to.ensg.mapping(genes.to.translate)
-gene.subset <- unique(c(gene.subset, trns$ensg))
-
-print(length(aml.logsdon.genes))
-print(length(cancer.genes))
-print(length(gene.subset))
-gene.subset <- unique(union(aml.logsdon.genes, union(cancer.genes, gene.subset)))
-gene.subset <- unique(union(gene.subset, all.ensg.targets))
-print(length(gene.subset))
-}
-
 if(use.subset) {
   common.genes <- intersect(common.genes, gene.subset)
 }
@@ -342,6 +283,17 @@ study.genes <- (lapply(exprs, rownames))
 study.filt.genes <- (lapply(expr.filt.matrices, rownames))
 common.genes <- Reduce(intersect, study.filt.genes)
 
+baz <- queryMany(common.genes, scopes="ensembl.gene", fields=c("symbol","go"), species="human")
+indices <- 1:nrow(baz)
+names(indices) <- baz$query
+ensg.to.go.gene.sets <- llply(indices, 
+                      .fun = function(indx) {
+                               unlist(llply(c("go.BP", "go.CC", "go.MF"), .fun = function(col) unlist(lapply(baz[indx,col], function(df) df$term))))
+                             })
+go.gene.sets <- invert.list(ensg.to.go.gene.sets)
+baz <- baz[!is.na(baz$symbol),]
+ensg.to.symbols <- as.list(baz$symbol)
+names(ensg.to.symbols) <- baz$query
 
 
 ## END modeling setup
@@ -381,6 +333,7 @@ test.drug.cols <- list()
 test.patient.cols <- list()
 test.response.cols <- list()
 
+data.sets.to.analyze <- c("ohsu")
 ds <- "ohsu"
 if(ds %in% data.sets.to.analyze) {
   set.seed(1234)
@@ -401,6 +354,48 @@ if(ds %in% data.sets.to.analyze) {
   train.drug.cols[[nxt.indx]] <- drug.name.col
   train.patient.cols[[nxt.indx]] <- expr.patient.id.cols[[ds]]
   train.response.cols[[nxt.indx]] <- "dss.auc.ll4"
+
+  set.seed(1234)
+  half.index <- createDataPartition(fits[[ds]][, data.set.drug.id.cols[[ds]]], p = .5, list = FALSE)
+  fits.set1 <- fits[[ds]][half.index, ]
+  fits.set2 <- fits[[ds]][-half.index, ]
+
+  nxt.indx <- length(train.set.names) + 1
+  train.set.names[[nxt.indx]] <- "ohsu.set1"
+  train.dss.args[[nxt.indx]] <- fits.set1
+  train.expr.args[[nxt.indx]] <- expr.filt.matrices[[ds]][common.genes, ] 
+  train.genomic.args[nxt.indx] <- list(NULL)
+  train.clinical.args[nxt.indx] <- list(NULL)
+  train.common.drugs[[nxt.indx]] <- common.drugs.by.data.set[[ds]]
+  train.drugs[[nxt.indx]] <- common.drugs.by.data.set[[ds]]
+  train.drug.cols[[nxt.indx]] <- drug.name.col
+  train.patient.cols[[nxt.indx]] <- expr.patient.id.cols[[ds]]
+  train.response.cols[[nxt.indx]] <- "dss.auc.ll4"
+
+  if(FALSE) {
+  nxt.indx <- length(train.set.names) + 1
+  train.set.names[[nxt.indx]] <- "ohsu.set2"
+  train.dss.args[[nxt.indx]] <- fits.set2
+  train.expr.args[[nxt.indx]] <- expr.filt.matrices[[ds]][common.genes, ] 
+  train.genomic.args[nxt.indx] <- list(NULL)
+  train.clinical.args[nxt.indx] <- list(NULL)
+  train.common.drugs[[nxt.indx]] <- common.drugs.by.data.set[[ds]]
+  train.drugs[[nxt.indx]] <- common.drugs.by.data.set[[ds]]
+  train.drug.cols[[nxt.indx]] <- drug.name.col
+  train.patient.cols[[nxt.indx]] <- expr.patient.id.cols[[ds]]
+  train.response.cols[[nxt.indx]] <- "dss.auc.ll4"
+  }
+
+  nxt.indx <- length(test.set.names) + 1
+  test.set.names[[nxt.indx]] <- "ohsu.set2"
+  test.dss.args[[nxt.indx]] <- fits.set2
+  test.expr.args[[nxt.indx]] <- expr.filt.matrices[[ds]][common.genes, ] 
+  test.genomic.args[nxt.indx] <- list(NULL)
+  test.clinical.args[nxt.indx] <- list(NULL)
+  test.common.drugs[[nxt.indx]] <- common.drugs.by.data.set[[ds]]
+  test.drug.cols[[nxt.indx]] <- drug.name.col
+  test.patient.cols[[nxt.indx]] <- expr.patient.id.cols[[ds]]
+  test.response.cols[[nxt.indx]] <- "dss.auc.ll4"
 
   rm(ohsu.dss.orig.train)
   rm(ohsu.dss.orig.test)
@@ -567,50 +562,17 @@ if(do.downsampling) {
                                          num.iterations = 100, with.replacement = FALSE, return.fits = FALSE) 
 } else { 
   ## Alternately, can do modeling without downsampling
-  cat("Including mean response only\n")
-  mean.response.only.train.expr.args <- train.expr.args
-  ## Read in the modeled mean response
-  for(idx in 1:length(mean.response.only.train.expr.args)) {
-    mean.response.only.train.expr.args[[idx]] <- NA
-  }
-
-  mean.response.only.test.expr.args <- test.expr.args
-  ## Read in the modeled mean response
-  for(idx in 1:length(mean.response.only.test.expr.args)) {
-    mean.response.only.test.expr.args[[idx]] <- NA
-  }
-
-  res.aucs[["mean.feature.only"]] <- train.and.test.crossproduct(gene.sets = gene.sets, drug.name.tbl = drug.name.tbl, train.set.names = train.set.names, train.dss.args = train.dss.args, 
-                                         train.expr.args = mean.response.only.train.expr.args, train.genomic.args = train.genomic.args, train.clinical.args = train.clinical.args, 
-                                         train.common.drugs = train.common.drugs, train.drugs = train.drugs, train.drug.cols = train.drug.cols, train.patient.cols = train.patient.cols, 
-                                         train.response.cols = train.response.cols, test.set.names = test.set.names, test.dss.args = test.dss.args, test.expr.args = mean.response.only.test.expr.args, 
-                                         test.genomic.args = test.genomic.args, test.clinical.args = test.clinical.args, test.common.drugs = test.common.drugs,
-                                         test.drug.cols = test.drug.cols, test.patient.cols = test.patient.cols, test.response.cols = test.response.cols, 
-                                         seed = 1234, use.rf = TRUE, use.svm = FALSE, use.mean = FALSE, num.processes = num.processes, alphas = c(0, 1), include.mean.response.as.feature = TRUE,
-                                         subtract.mean.response = FALSE, keep.forest = TRUE)
-
-
-  do.random <- TRUE
+  do.random <- FALSE
   if(do.random) {
   cat("Randoming OHSU expr\n")
 
   set.seed(1234)
   random.train.expr.args <- train.expr.args
   for(nm in 1:length(random.train.expr.args)) {
-    shuffle.samples <- FALSE
-    if(shuffle.samples) {
-      cat(paste0("Shuffling samples for ", train.set.names[[nm]], "\n"))
-      indices <- sample.int(ncol(random.train.expr.args[[nm]]))
-      samples <- colnames(random.train.expr.args[[nm]])
-      random.train.expr.args[[nm]] <- random.train.expr.args[[nm]][, indices]
-      colnames(random.train.expr.args[[nm]]) <- samples
-    } else {
-      cat(paste0("Shuffling genes for ", train.set.names[[nm]], "\n"))
-      indices <- sample.int(nrow(random.train.expr.args[[nm]]))
-      genes <- rownames(random.train.expr.args[[nm]])
-      random.train.expr.args[[nm]] <- random.train.expr.args[[nm]][indices, ]
-      rownames(random.train.expr.args[[nm]]) <- genes
-    }
+    indices <- sample.int(ncol(random.train.expr.args[[nm]]))
+    samples <- colnames(random.train.expr.args[[nm]])
+    random.train.expr.args[[nm]] <- random.train.expr.args[[nm]][, indices]
+    colnames(random.train.expr.args[[nm]]) <- samples
   }
   res.aucs[["random"]] <- train.and.test.crossproduct(gene.sets = gene.sets, drug.name.tbl = drug.name.tbl, train.set.names = train.set.names, train.dss.args = train.dss.args, 
                                          train.expr.args = random.train.expr.args, train.genomic.args = train.genomic.args, train.clinical.args = train.clinical.args, 
@@ -630,7 +592,6 @@ if(do.downsampling) {
     nm2 <- nm1
     mean.resp.file <- paste0("fimm-ohsu-validate-trained-models-112217-one-ohsu-no-filtering-all-mean-response-", nm1, "-vs-", nm2, "-ridge-gene-prediction.tsv")
     mean.resp.file <- paste0("fimm-ohsu-validate-trained-models-112217-one-ohsu-no-filtering-all-mean-response-", nm1, "-vs-", nm2, "-rf-gene-prediction.tsv")
-    mean.resp.file <- paste0("fimm-ohsu-validate-trained-models-112217-one-ohsu-no-filtering-all-mean-response-", nm1, "-vs-", nm2, "-lasso-gene-prediction.tsv")
     mean.resp <- read.table(file = mean.resp.file, sep="\t", header=TRUE)
     if(grepl(nm2, pattern="ohsu")) {
       ## Convert the column names from X20.00347 to 20-00347
@@ -644,11 +605,10 @@ if(do.downsampling) {
   ## Read in the modeled mean response
   for(idx in 1:length(mean.response.test.clinical.args)) {
     nm2 <- test.set.names[[idx]]
-    nm1 <- "ohsu"
-##    nm1 <- nm2
+    nm1 <- "ohsu.set1"
+    nm1 <- nm2
     mean.resp.file <- paste0("fimm-ohsu-validate-trained-models-112217-one-ohsu-no-filtering-all-mean-response-", nm1, "-vs-", nm2, "-ridge-gene-prediction.tsv")
     mean.resp.file <- paste0("fimm-ohsu-validate-trained-models-112217-one-ohsu-no-filtering-all-mean-response-", nm1, "-vs-", nm2, "-rf-gene-prediction.tsv")
-    mean.resp.file <- paste0("fimm-ohsu-validate-trained-models-112217-one-ohsu-no-filtering-all-mean-response-", nm1, "-vs-", nm2, "-lasso-gene-prediction.tsv")
     mean.resp <- read.table(file = mean.resp.file, sep="\t", header=TRUE)
     if(grepl(nm2, pattern="ohsu")) {
       ## Convert the column names from X20.00347 to 20-00347
@@ -778,36 +738,10 @@ for(test.set.name in unique(tbl$test.set)) {
 ## Make violin plots of correlations (model prediction of drug response vs actual drug response) faceted by
 ## training/test data set and type of feature (gene, biocart, hallmark, kegg, and reactome).
 tbl$gene.set <- factor(tbl$gene.set, levels = c("gene", "biocarta", "hallmark", "kegg", "reactome"))
-tbl$train.set <- factor(tbl$train.set, levels = c("ctrp", "ctrp.all", "ctrp.heme", "ctrp.aml", "ohsu", "ntap"))
-tbl$pt.response <- factor(tbl$pt.response, levels = c("random", "no.transform", "subtract.mean", "mean.feature", "mean.feature.only", "model.mean.feature"))
+tbl$train.set <- factor(tbl$train.set, levels = c("ctrp", "ctrp.all", "ctrp.heme", "ctrp.aml", "ohsu", "ohsu.set1", "ohsu.set2", "ntap"))
+tbl$pt.response <- factor(tbl$pt.response, levels = c("random", "no.transform", "subtract.mean", "mean.feature", "model.mean.feature"))
 tbl$model <- factor(tbl$model, levels = c("lasso", "ridge", "rf"))
-for(resp in unique(tbl$response)) {
-  for(met in c("pearson", "spearman")) {
-##    for(gset in unique(tbl$gene.set)) { }
-##    for(mdl in c("ridge", "lasso", "rf")) { }
-      tr.set <- "ohsu"
-      tt.set <- "fimm"
-      sub <- subset(tbl, metric == met & response == resp & train.set == tr.set & test.set == tt.set)
-      g <- ggplot(data = sub, aes(x = model, y = val))
-      g <- g + facet_grid(gene.set ~ pt.response)
-      g <- g + geom_violin()
-##    g <- g + geom_beeswarm()
-      g <- g + geom_boxplot(width = 0.5)
-      g <- g + geom_hline(yintercept = 0, linetype = "dashed")
-      g <- g + ylab(paste0(capwords(met), " Correlation"))
-      g <- g + ggtitle(paste0(resp, " ", capwords(met), " "))
-      g <- g + ylim(c(-1,1))
-      file <- paste0(file.prefix, "-", resp, "-", met, "-", tr.set, "-vs-", tt.set, "-vs-gene-sets.pdf")
-      pdf(file)
-      print(g)
-      d <- dev.off()
-##    glist[[length(glist)+1]] <- g
-##    { }
-  }
-##  do.call("grid.arrange", glist)
-}
 
-if(FALSE) {
 for(resp in unique(tbl$response)) {
   for(met in c("pearson", "spearman")) {
 ##    for(gset in unique(tbl$gene.set)) { }
@@ -833,73 +767,6 @@ for(resp in unique(tbl$response)) {
   }
 ##  do.call("grid.arrange", glist)
 }
-}
-
-save.image(rdata.file)
-
-library(plyr)
-library(randomForest)
-library(glmnet)
-library(ggbeeswarm)
-foo <- ldply(res.aucs, .fun = function(res) { extract.table.2(res) })
-colnames(foo)[1] <- "response"
-foo$mean.resp.rank <- unlist(apply(foo[, c("model", "coeffs", "coeff.vals")], 1, 
-                                   function(row) {
-                                     coeffs <- as.numeric(unlist(strsplit(row[3], split=",[ ]*")))
-                                     names(coeffs) <- unlist(strsplit(row[2], split=",[ ]*"))
-                                     ## Order so most important is last
-                                     switch(row[1], 
-                                       "rf" = { coeffs <- coeffs[order(coeffs, decreasing = FALSE)] },
-                                       "lasso" = { coeffs <- coeffs[order(abs(coeffs), decreasing = FALSE)] },
-                                       "ridge" = { coeffs <- coeffs[order(abs(coeffs), decreasing = FALSE)] },
-                                       { stop(paste0("Unexpected: ", row[1], "\n")) })
-                                     coeffs <- rank(coeffs, ties.method = "average")
-                                     tmp <- grepl(x=names(coeffs), pattern="mean.resp")
-                                     resp.rank <- ifelse(!any(tmp), 0, coeffs[tmp] / length(tmp))
-                                     resp.rank
-                                   }))
-
-foo.rf <- subset(foo, model == "rf" & response == "mean.feature")
-apply(foo.rf[1:5, c("model", "coeffs", "coeff.vals")], 1, function(row) {
-                                     coeffs <- as.numeric(unlist(strsplit(row[3], split=",[ ]*")))
-                                     names(coeffs) <- unlist(strsplit(row[2], split=",[ ]*"))
-         plot(density(coeffs))
-      })
-
-
-
-baz <- subset(foo, response %in% c("model.mean.feature", "mean.feature", "mean.feature.only"))
-
-g <- ggplot(data = baz, aes(x = response, y = mean.resp.rank))
-g <- g + ylab("Fractional Rank of Mean Response")
-g <- g + facet_grid(gene.set ~ model)
-## g <- g + geom_beeswarm()
-## g <- g + geom_violin()
-g <- g + geom_boxplot()
-g <- g + theme(axis.text.x=element_text(angle = 45, hjust = 1))
-g <- g + ggtitle("OHSU trained")
-
-pdf(paste0(file.prefix, "-rank-mean-resp.pdf"))
-print(g)
-d <- dev.off()
-
-## Output the number of times that mean.resp is ranked 1st
-baz2 <- ddply(baz, .variables = c("response", "model", "gene.set"),
-              .fun = function(df) {
-                 data.frame(length(which(is.finite(df$mean.resp.rank) & (df$mean.resp.rank == 1)))/nrow(df))
-              })
-colnames(baz2) <- c("response", "model", "gene.set", "frac.mean.resp.is.best.feature")
-g <- ggplot(data = baz2, aes(x = response, y = frac.mean.resp.is.best.feature))
-g <- g + geom_col()
-g <- g + facet_grid(gene.set ~ model)
-g <- g + ylab("Fraction of Cases with\nMean Respone is Top Feature")
-g <- g + theme(axis.text.x=element_text(angle = 45, hjust = 1))
-g <- g + ggtitle("OHSU trained")
-
-pdf(paste0(file.prefix, "-freq-of-best-rank-mean-resp.pdf"))
-print(g)
-d <- dev.off()
-
 
 stop("successfully wrote pdfs")
 
@@ -1171,18 +1038,6 @@ annotate.table.sig.overlap <- function(tbl, gene.sets, from.col, to.col, univers
   tbl
 }
 
-
-baz <- queryMany(common.genes, scopes="ensembl.gene", fields=c("symbol","go"), species="human")
-indices <- 1:nrow(baz)
-names(indices) <- baz$query
-ensg.to.go.gene.sets <- llply(indices, 
-                      .fun = function(indx) {
-                               unlist(llply(c("go.BP", "go.CC", "go.MF"), .fun = function(col) unlist(lapply(baz[indx,col], function(df) df$term))))
-                             })
-go.gene.sets <- invert.list(ensg.to.go.gene.sets)
-baz <- baz[!is.na(baz$symbol),]
-ensg.to.symbols <- as.list(baz$symbol)
-names(ensg.to.symbols) <- baz$query
 
 ## For a given training set, output all drugs that are positive correlated across all test sets
 for(resp in unique(tbl$response)) {

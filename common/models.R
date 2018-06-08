@@ -1,20 +1,40 @@
 suppressPackageStartupMessages(library("hdi"))
+suppressPackageStartupMessages(library("party"))  ## for cforest
 
 get.fit.coeff <- function(fit, model) {
-
-  if(model == "glmnet") {
-    tmp <- coefficients(fit, s = "lambda.min")
-    c1 <- as.vector(tmp)
-    names(c1) <- rownames(tmp)
-  } else {
-    col <- colnames(importance(fit))[1]
-    ## NB: %IncMSE = [ mse(j) - mse0 ] / mse0 * 100  [ mse(j): permuted; mse0: original MSE ]
-    ## i.e., larger/more positive %IncMSE is better
-    if(!grepl(col, pattern="IncMSE")) { stop(paste0("Was expected ", col, " to be %IncMSE\n")) }
-    coeffs <- importance(fit)[,1,drop=FALSE]
-    c1 <- coeffs[,1]
-    names(c1) <- rownames(coeffs)
-  }
+  c1 <- NULL
+  switch(model,
+    "glmnet" = {
+      tmp <- coefficients(fit, s = "lambda.min")
+      c1 <- as.vector(tmp)
+      names(c1) <- rownames(tmp)
+    },
+    "rf" = {
+      indx <- 1
+      pattern = "IncMSE"
+      use.node.purity <- FALSE
+      scale <- TRUE
+      if(use.node.purity) {
+        indx <- 2
+        pattern = "IncNodePurity"
+      }
+      col <- colnames(importance(fit))[indx]
+print(col)
+      ## NB: %IncMSE = [ mse(j) - mse0 ] / mse0 * 100  [ mse(j): permuted; mse0: original MSE ]
+      ## i.e., larger/more positive %IncMSE is better
+      if(!grepl(col, pattern=pattern)) { stop(paste0("Was expected ", col, " to be %IncMSE\n")) }
+      coeffs <- importance(fit, scale = scale)[,indx,drop=FALSE]
+      c1 <- coeffs[,1]
+      names(c1) <- rownames(coeffs)
+    },
+    "crf" = {
+print(class(fit))
+set.seed(1234)
+      c1 <- varimp(fit, nperm = 5, conditional = TRUE)
+print(c1)
+      names(c1) <- rownames(fit@responses@variables)
+    },
+    { stop(paste0("Unknown model: ", model, " in get.fit.coeff\n")) })
   return(c1)
 }
 
@@ -1593,7 +1613,7 @@ test.model.with.downsampling_ <- function(fits, drug.name.tbl, train.drug.col, t
 }
 
 
-test.model_ <- function(fits, drug.name.tbl, train.drug.col, x.arg, test.drc, test.drug.col, seed = 1234, use.rf = FALSE, use.svm = FALSE, use.ridge = TRUE, use.mean = TRUE, flatten.downsampled.fits = FALSE) {
+test.model_ <- function(fits, drug.name.tbl, train.drug.col, x.arg, test.drc, test.drug.col, seed = 1234, use.rf = FALSE, use.cforest = FALSE, use.svm = FALSE, use.ridge = TRUE, use.mean = TRUE, flatten.downsampled.fits = FALSE) {
    ## Iterate through the fits (on training data) and apply them to the test data.
    ## fits is a list (of lists).  The ith entry is a list of fits for drug i.
    ## Each entry of _that_ list is a fit using a different method.
@@ -1606,16 +1626,53 @@ test.model_ <- function(fits, drug.name.tbl, train.drug.col, x.arg, test.drc, te
                          ret.list <- list()
                          if(flatten.downsampled.fits == TRUE) { drug.fits <- unlist(drug.fits, recursive = FALSE) }
                          for(i in 1:length(drug.fits)) {
-                             train.drug <- drug.fits[[i]]$train.drug
-                             test.drug <- drug.name.tbl[drug.name.tbl[, train.drug.col] == train.drug, test.drug.col]
-                             newy <- as.numeric(test.drc[as.character(test.drug),])
-                             flag <- is.na(newy)
-                             newx <- newx.orig[, !flag, drop = F]
-                             newy <- newy[!flag]
+                             train.drug <- unlist(strsplit(drug.fits[[i]]$train.drug, split=",[ ]*"))
+                             test.drug <- as.character(drug.name.tbl[drug.name.tbl[, train.drug.col] %in% train.drug, test.drug.col])
+                             newx <- NULL
+                             newy <- NULL
+                             drug.names <- test.drug
+                             drug.indicators <- NA
+
+                             if(length(test.drug) == 1) {
+                               newy <- as.numeric(test.drc[as.character(test.drug),])
+                               flag <- is.na(newy)
+                               newx <- newx.orig[, !flag, drop = F]
+                               newy <- newy[!flag]
+                             } else {
+                               xs <- list()
+                               ys <- list()
+                               drug.names <- list()
+                               drug.indicators <- list()
+                               for(si in 1:length(test.drug)) {
+                                 drug <- test.drug[si]
+                                 newy <- as.numeric(test.drc[as.character(drug),])
+                                 flag <- is.na(newy)
+                                 newy <- newy[!flag]
+                                 newx <- newx.orig[, !flag, drop = F]
+                                 id.matrix <- matrix(data = 0, nrow = length(test.drug), ncol = ncol(newx))
+                                 id.matrix[si, ] <- 1
+                                 ## NB: this is train (not test!) drug below to match the coefficient name from training
+                                 rownames(id.matrix) <- train.drug
+                                 xs[[si]] <- rbind(newx, id.matrix)
+                                 ys[[si]] <- newy
+                                 drug.names[[si]] <- as.character(drug)
+                                 drug.indicators[[si]] <- rep(si, length(newy))
+                               }
+                               newy <- Reduce(c, ys)
+                               newx <- Reduce(cbind, xs)
+                               drug.names <- Reduce(c, drug.names)
+                               drug.indicators <- Reduce(c, drug.indicators)
+                               rm(ys)
+                               rm(xs)
+                             }
+                             train.drug <- paste(train.drug, collapse=",")
+                             test.drug <- paste(test.drug, collapse=",")
+
+
 
                              n.test <- length(newy)
 
-                             if(length(test.drug) != 1) { next }
+                             if(length(test.drug) < 1) { next }
                              fit <- drug.fits[[i]]$fit
                              if(is.na(fit)) { next }
                              alpha <- drug.fits[[i]]$alpha
@@ -1633,23 +1690,29 @@ test.model_ <- function(fits, drug.name.tbl, train.drug.col, x.arg, test.drc, te
                                  for(s in svalues) {
                                    set.seed(seed)
                                    pred <- tryCatch({predict(fit, newx=t(newx), s = s)}, error = function(e) { cat("glmnet pred err\n"); return(NA) })
-                                   ret.list[[length(ret.list)+1]] <- list(train.drug = train.drug, test.drug = test.drug, alpha = alpha, s = s, model = model, predicted = pred, actual = newy, n.test = n.test)
+                                   ret.list[[length(ret.list)+1]] <- list(train.drug = train.drug, test.drug = test.drug, alpha = alpha, s = s, model = model, predicted = pred, actual = newy, n.test = n.test, drug.names = drug.names, drug.indicators = drug.indicators)
                                  }
                                }
                              } else if(model == "rf") {
                                if(use.rf) {
-                                 pred <- tryCatch({predict(fit, t(newx))}, error = function(e) { cat("glmnet pred err\n"); return(NA) })
-                                 ret.list[[length(ret.list)+1]] <- list(train.drug = train.drug, test.drug = test.drug, alpha = alpha, s = s, model = model, predicted = pred, actual = newy, n.test = n.test)
+                                 pred <- tryCatch({predict(fit, t(newx))}, error = function(e) { cat("rf pred err\n"); return(NA) })
+                                 ret.list[[length(ret.list)+1]] <- list(train.drug = train.drug, test.drug = test.drug, alpha = alpha, s = s, model = model, predicted = pred, actual = newy, n.test = n.test, drug.names = drug.names, drug.indicators = drug.indicators)
+                               }
+                             } else if(model == "crf") {
+                               if(use.cforest) {
+                                 pred <- tryCatch({predict(fit, newdata = t(newx))[,1]}, error = function(e) { cat("cforest pred err\n"); return(NA) })
+                                 if(!is.na(pred)) { rownames(pred) <- rownames(t(newx)) } 
+                                 ret.list[[length(ret.list)+1]] <- list(train.drug = train.drug, test.drug = test.drug, alpha = alpha, s = s, model = model, predicted = pred, actual = newy, n.test = n.test, drug.names = drug.names, drug.indicators = drug.indicators)
                                }
                              } else if(model == "svm") {
                                if(use.svm) {
                                  pred <- tryCatch({predict(fit, newx=t(newx))}, error = function(e) { cat("glmnet pred err\n"); return(NA) })
-                                 ret.list[[length(ret.list)+1]] <- list(train.drug = train.drug, test.drug = test.drug, alpha = alpha, s = s, model = model, predicted = pred, actual = newy, n.test = n.test)
+                                 ret.list[[length(ret.list)+1]] <- list(train.drug = train.drug, test.drug = test.drug, alpha = alpha, s = s, model = model, predicted = pred, actual = newy, n.test = n.test, drug.names = drug.names, drug.indicators = drug.indicators)
                                }
                              } else if(model == "mean") {
                                if(use.mean) {
                                  pred <- rep(fit, length(newy))
-                                 ret.list[[length(ret.list)+1]] <- list(train.drug = train.drug, test.drug = test.drug, alpha = alpha, s = s, model = model, predicted = pred, actual = newy, n.test = n.test)
+                                 ret.list[[length(ret.list)+1]] <- list(train.drug = train.drug, test.drug = test.drug, alpha = alpha, s = s, model = model, predicted = pred, actual = newy, n.test = n.test, drug.names = drug.names, drug.indicators = drug.indicators)
                                }
                              } else {
                                stop(paste0("Unknown model: ", model, "\n"))
@@ -1662,18 +1725,42 @@ test.model_ <- function(fits, drug.name.tbl, train.drug.col, x.arg, test.drc, te
 
 
 ## This function does not format the drug or expression data
-train.model_ <- function(x.arg, train.drc, train.drugs, seed = 1234, use.rf = FALSE, use.svm = FALSE, use.ridge = TRUE, use.mean = TRUE, calc.coefficient.pvals = FALSE, alphas = c(0, 1), keep.forest = TRUE, use.glmnet.intercept = TRUE) {
+train.model_ <- function(x.arg, train.drc, train.drugs, seed = 1234, use.rf = FALSE, use.cforest = FALSE, use.svm = FALSE, use.ridge = TRUE, use.mean = TRUE, calc.coefficient.pvals = FALSE, alphas = c(0, 1), keep.forest = TRUE, use.glmnet.intercept = TRUE, penalty.factor = NULL) {
 
    ## Fit ridge to training data and apply to validation for each drug independently.
    ret <- llply(1:length(train.drugs),
                 .parallel = TRUE,
                 .fun = function(drug.i) {
                          train.drug <- train.drugs[drug.i]
-                         x <- x.arg
-                         y <- as.numeric(train.drc[as.character(train.drug),])
-                         flag <- is.na(y)
-                         x <- x[, !flag, drop=F]
-                         y <- y[!flag]
+                         x <- NULL
+                         y <- NULL
+                         if(class(train.drug) != "list") {
+                           y <- as.numeric(train.drc[as.character(train.drug),])
+                           flag <- is.na(y)
+                           x <- x.arg[, !flag, drop=F]
+                           y <- y[!flag]
+                         } else {
+                           xs <- list()
+                           ys <- list()
+                           train.drug <- unname(unlist(train.drug))
+                           for(si in 1:length(train.drug)) {
+                             drug <- train.drug[si]
+                             y <- as.numeric(train.drc[as.character(drug),])
+                             flag <- is.na(y)
+                             x <- x.arg[, !flag, drop=F]
+                             y <- y[!flag]
+                             id.matrix <- matrix(data = 0, nrow = length(train.drug), ncol = ncol(x))
+                             id.matrix[si, ] <- 1
+                             rownames(id.matrix) <- train.drug
+                             xs[[si]] <- rbind(x, id.matrix)
+                             ys[[si]] <- y
+                           }
+                           y <- Reduce(c, ys)
+                           x <- Reduce(cbind, xs)
+                           rm(ys)
+                           rm(xs)
+                         }
+                         train.drug <- paste(train.drug, collapse=",")
                          n.train <- length(y)
                          cat(paste0("Modeling ", train.drug, " (n = ", n.train, ")\n"))
 
@@ -1705,15 +1792,27 @@ train.model_ <- function(x.arg, train.drc, train.drugs, seed = 1234, use.rf = FA
                              pvals <- fit.lasso$pval
                            }
                            set.seed(seed)
-                           fit <- tryCatch({cv.glmnet(x = t(x), y, family = "gaussian", type.measure = "mse", nfolds = nfolds, foldid = foldid, alpha = alpha, standardize = FALSE, parallel = TRUE, intercept = use.glmnet.intercept)}, error = function(e) { print(e); cat("glmnet err\n"); return(NA) })
+                           if(is.null(penalty.factor)) { penalty.factor <- rep(1, nrow(x)) }
+                           fit <- tryCatch({cv.glmnet(x = t(x), y, family = "gaussian", type.measure = "mse", nfolds = nfolds, foldid = foldid, alpha = alpha, standardize = FALSE, parallel = TRUE, intercept = use.glmnet.intercept, penalty.factor = penalty.factor)}, error = function(e) { print(e); cat("glmnet err\n"); return(NA) })
                            ret.list[[length(ret.list)+1]] <- list(train.drug = train.drug, fit = fit, alpha = alpha, model = "glmnet", n.train = n.train, pvals = pvals, n.features = n.features)
                          }
 
                          ## Use RF
                          if(use.rf) {
                            set.seed(seed)
-                           fit <- tryCatch({randomForest(x = t(x), y, importance = TRUE, keep.forest = keep.forest)}, error = function(e) { cat("rf error\n"); return(NA) })
+                           fit <- tryCatch({randomForest(x = t(x), y, ntree = 2 * nrow(x), nPerm = 10, mtry = 5, importance = TRUE, keep.forest = keep.forest)}, error = function(e) { cat("rf error\n"); return(NA) })
                            ret.list[[length(ret.list)+1]] <- list(train.drug = train.drug, fit = fit, alpha = NA, model = "rf", n.train = n.train, pvals = NA, n.features = n.features)
+                         }
+
+                         ## Use Cforest 
+                         if(use.cforest) {
+                           set.seed(seed)
+                           mdf <- as.data.frame(cbind(t(x), y))
+                           colnames(mdf)[ncol(mdf)] <- "resp"
+save(mdf, file="mdf.Rd")
+##                           fit <- tryCatch({cforest(resp ~ ., mdf, controls = cforest_unbiased(ntree = nrow(x), mtry=4))}, error = function(e) { cat("crf error\n"); return(NA) })
+                           fit <- tryCatch({cforest(resp ~ ., mdf, controls = cforest_unbiased(ntree = 100, mtry=4))}, error = function(e) { cat("crf error\n"); return(NA) })
+                           ret.list[[length(ret.list)+1]] <- list(train.drug = train.drug, fit = fit, alpha = NA, model = "crf", n.train = n.train, pvals = NA, n.features = n.features)
                          }
 
                          ## Use SVM
@@ -2057,7 +2156,8 @@ bootstrap.model <- function(train.dss.arg, train.expr.arg, train.common.drugs, t
 
 
 ## Do all train x test data set x metric (e.g., pearson, spearman) x response (e.g., auc, dss2) x data type (e.g., gene-level, pathway-level expression) comparisons
-train.and.test.crossproduct <- function(gene.sets, drug.name.tbl, train.set.names, train.dss.args, train.expr.args, train.genomic.args, train.clinical.args, train.common.drugs, train.drugs, train.drug.cols, train.patient.cols, train.response.cols, test.set.names, test.dss.args, test.expr.args, test.genomic.args, test.clinical.args, test.common.drugs, test.drug.cols, test.patient.cols, test.response.cols, seed = 1234, use.rf = FALSE, use.svm = FALSE, use.ridge = TRUE, use.mean = TRUE, num.processes = 1, alphas = c(0, 1), include.mean.response.as.feature = FALSE, subtract.mean.response = FALSE, keep.forest = TRUE) {
+train.and.test.crossproduct <- function(gene.sets, drug.name.tbl, train.set.names, train.dss.args, train.expr.args, train.genomic.args, train.clinical.args, train.common.drugs, train.drugs, train.drug.cols, train.patient.cols, train.response.cols, test.set.names, test.dss.args, test.expr.args, test.genomic.args, test.clinical.args, test.common.drugs, test.drug.cols, test.patient.cols, test.response.cols, seed = 1234, use.rf = FALSE, use.cforest = FALSE, use.svm = FALSE, use.ridge = TRUE, use.mean = TRUE, num.processes = 1, alphas = c(0, 1), include.mean.response.as.feature = FALSE, subtract.mean.response = FALSE, keep.forest = TRUE, penalize.mean.response = TRUE) {
+
 
    z.score.expr <- TRUE
    z.score.drc <- TRUE
@@ -2109,7 +2209,6 @@ train.and.test.crossproduct <- function(gene.sets, drug.name.tbl, train.set.name
          # z-score
          train.drc <- t(scale(t(train.drc), center = TRUE, scale = TRUE))
      }
-
      if(!is.null(train.genomic)) {
        train.genomic <- train.genomic[, train.samples, drop=F]
      }
@@ -2219,7 +2318,6 @@ train.and.test.crossproduct <- function(gene.sets, drug.name.tbl, train.set.name
      clinical.test.features <- Reduce(intersect, lapply(test.set.names, function(set.name) rownames(test.clinicals[[set.name]])))
      clinical.features <- intersect(clinical.train.features, clinical.test.features)
    }
-
    ## Assemble the design matrices (combination of expression, genomic, and clinical) using only common features.
    for(train.indx in 1:length(train.set.names)) {
      train.set <- train.set.names[[train.indx]]
@@ -2237,7 +2335,6 @@ train.and.test.crossproduct <- function(gene.sets, drug.name.tbl, train.set.name
      }
 
    }
-
    if(length(test.set.names) > 0) {
      for(test.indx in 1:length(test.set.names)) {
        test.set <- test.set.names[[test.indx]]
@@ -2342,9 +2439,18 @@ print(test.expr.sets[[test.set]][[gene.set]]["mean.resp",])
 
      for(gene.set in names(gene.sets)) {
 
+       if(is.na(train.expr.sets[[train.set]][[gene.set]])) { train.expr.sets[[train.set]][[gene.set]] <- NULL }
        x <- rbind(train.expr.sets[[train.set]][[gene.set]], train.genomics[[train.set]], train.clinicals[[train.set]])
+       if(nrow(x) == 1) {
+         x <- rbind(x, "dummy" = rep(0,ncol(x)))
+       }
        cat(paste0("Fitting models for train set ", train.set, " and gene.set ", gene.set, "\n"))
-       fits <- train.model_(x, train.drcs[[train.set]], train.drugs[[train.indx]], seed = seed, use.rf = use.rf, use.svm = use.svm, use.ridge = use.ridge, use.mean = use.mean, alphas = alphas, keep.forest = keep.forest)
+       penalty.factor <- rep(1, nrow(x))
+       if(!penalize.mean.response) { 
+         flag <- rownames(x) == "mean.resp"
+         if(any(flag)) { penalty.factor[flag] <- 0 }
+       }
+       fits <- train.model_(x, train.drcs[[train.set]], train.drugs[[train.indx]], seed = seed, use.rf = use.rf, use.cforest = use.cforest, use.svm = use.svm, use.ridge = use.ridge, use.mean = use.mean, alphas = alphas, keep.forest = keep.forest, penalty.factor = penalty.factor)
        all.fits[[train.set]][[gene.set]] <- fits
        rm(x)
        gc()
@@ -2354,8 +2460,12 @@ print(test.expr.sets[[test.set]][[gene.set]]["mean.resp",])
   
            test.set <- test.set.names[[test.indx]]
            cat(paste0("Training on ", train.set, " and testing on ", test.set, " using gene.set ", gene.set, "\n"))
+           if(is.na(test.expr.sets[[test.set]][[gene.set]])) { test.expr.sets[[test.set]][[gene.set]] <- NULL }
            newx <- rbind(test.expr.sets[[test.set]][[gene.set]], test.genomics[[test.set]], test.clinicals[[test.set]])
-           all.comparisons[[train.set]][[test.set]][[gene.set]] <- test.model_(fits, drug.name.tbl, train.drug.cols[[train.indx]], x.arg = newx, test.drc = test.drcs[[test.set]], test.drug.cols[[test.indx]], seed = seed, use.rf = use.rf, use.svm = use.svm, use.ridge = use.ridge, use.mean = use.mean, flatten.downsampled.fits = FALSE)
+           if(nrow(newx) == 1) {
+             newx <- rbind(newx, "dummy" = rep(0,ncol(newx)))
+           }
+           all.comparisons[[train.set]][[test.set]][[gene.set]] <- test.model_(fits, drug.name.tbl, train.drug.cols[[train.indx]], x.arg = newx, test.drc = test.drcs[[test.set]], test.drug.cols[[test.indx]], seed = seed, use.rf = use.rf, use.cforest = use.cforest, use.svm = use.svm, use.ridge = use.ridge, use.mean = use.mean, flatten.downsampled.fits = FALSE)
 
          } ## for(test.indx in 1:length(test.set.names))
        }
@@ -2402,7 +2512,7 @@ prepare.train.and.test.crossproduct <- function(gene.sets, drug.name.tbl, train.
        train.samples <- intersect(train.samples, colnames(train.clinical))
      }
 
-     if(!is.null(train.expr)) {
+     if(!is.na(train.expr) && !is.null(train.expr)) {
        train.samples <- intersect(train.samples, colnames(train.expr))
      }
 
@@ -2426,7 +2536,7 @@ prepare.train.and.test.crossproduct <- function(gene.sets, drug.name.tbl, train.
      if(!is.null(train.clinical)) {
        train.clinical <- train.clinical[, train.samples]
      }
-     if(!is.null(train.expr)) {
+     if(!is.na(train.expr) && !is.null(train.expr)) {
        train.expr <- train.expr[, train.samples]
        flag <- unlist(apply(train.expr, 1, function(row) any(!is.finite(row)) || (any(is.na(row))) || (all(row == row[1]))))
        train.expr <- train.expr[!flag, ]
@@ -2471,7 +2581,7 @@ prepare.train.and.test.crossproduct <- function(gene.sets, drug.name.tbl, train.
          test.samples <- intersect(test.samples, colnames(test.clinical))
        }
   
-       if(!is.null(test.expr)) {
+       if(!is.na(test.expr) && !is.null(test.expr)) {
          test.samples <- intersect(test.samples, colnames(test.expr))
        }
   
@@ -2492,7 +2602,7 @@ prepare.train.and.test.crossproduct <- function(gene.sets, drug.name.tbl, train.
        if(!is.null(test.clinical)) {
          test.clinical <- test.clinical[, test.samples]
        }
-       if(!is.null(test.expr)) {
+       if(!is.na(test.expr) && !is.null(test.expr)) {
          test.expr <- test.expr[, test.samples]
          flag <- unlist(apply(test.expr, 1, function(row) any(!is.finite(row)) || (any(is.na(row))) || (all(row == row[1]))))
          test.expr <- test.expr[!flag, ]
@@ -2534,7 +2644,7 @@ prepare.train.and.test.crossproduct <- function(gene.sets, drug.name.tbl, train.
    for(train.indx in 1:length(train.set.names)) {
      train.set <- train.set.names[[train.indx]]
 
-     if(!is.null(train.exprs[[train.set]])) {
+     if(!is.na(train.exprs[[train.set]]) && !is.null(train.exprs[[train.set]])) {
        train.exprs[[train.set]] <- train.exprs[[train.set]][expr.features, ]
      }
 
@@ -2552,7 +2662,7 @@ prepare.train.and.test.crossproduct <- function(gene.sets, drug.name.tbl, train.
      for(test.indx in 1:length(test.set.names)) {
        test.set <- test.set.names[[test.indx]]
   
-       if(!is.null(test.exprs[[test.set]])) {
+       if(!is.na(test.exprs[[test.set]]) && !is.null(test.exprs[[test.set]])) {
          test.exprs[[test.set]] <- test.exprs[[test.set]][expr.features, ]
        }
   
@@ -2586,9 +2696,12 @@ prepare.train.and.test.crossproduct <- function(gene.sets, drug.name.tbl, train.
        ## Add the mean of the _z-scored_ responses as a feature (but do not zscore them)
        if(include.mean.response.as.feature) {
          y.mean <- (colMeans(train.drcs[[train.set]], na.rm=TRUE))
-         train.expr.sets[[train.set]][[gene.set]] <- rbind(train.expr.sets[[train.set]][[gene.set]], "mean.resp" = unname(y.mean[colnames(train.expr.sets[[train.set]][[gene.set]])]))
-##cat(paste0("mean response train:\n"))
-##print(train.expr.sets[[train.set]][[gene.set]]["mean.resp",])
+         if(!is.na(train.expr.sets[[train.set]][[gene.set]]) && !is.null(train.expr.sets[[train.set]][[gene.set]])) {
+           train.expr.sets[[train.set]][[gene.set]] <- rbind(train.expr.sets[[train.set]][[gene.set]], "mean.resp" = unname(y.mean[colnames(train.expr.sets[[train.set]][[gene.set]])]))
+         } else {
+           train.expr.sets[[train.set]][[gene.set]] <- t(data.frame("dummy" = rep(0,length(y.mean)), "mean.resp" = y.mean))
+           colnames(train.expr.sets[[train.set]][[gene.set]]) <- names(y.mean)
+         }
        }
      }
    }
@@ -2611,10 +2724,14 @@ prepare.train.and.test.crossproduct <- function(gene.sets, drug.name.tbl, train.
          }
          ## Add the mean of the _z-scored_ responses as a feature (but do not zscore them)
          if(include.mean.response.as.feature) {
+
            y.mean <- (colMeans(test.drcs[[test.set]], na.rm=TRUE))
-           test.expr.sets[[test.set]][[gene.set]] <- rbind(test.expr.sets[[test.set]][[gene.set]], "mean.resp" = unname(y.mean[colnames(test.expr.sets[[test.set]][[gene.set]])]))
-cat(paste0("mean response test:\n"))
-print(test.expr.sets[[test.set]][[gene.set]]["mean.resp",])
+           if(!is.na(test.expr.sets[[test.set]][[gene.set]]) && !is.null(test.expr.sets[[test.set]][[gene.set]])) {
+             test.expr.sets[[test.set]][[gene.set]] <- rbind(test.expr.sets[[test.set]][[gene.set]], "mean.resp" = unname(y.mean[colnames(test.expr.sets[[test.set]][[gene.set]])]))
+           } else {
+             test.expr.sets[[test.set]][[gene.set]] <- t(data.frame("dummy" = rep(0,length(y.mean)), "mean.resp" = y.mean))
+             colnames(test.expr.sets[[test.set]][[gene.set]]) <- names(y.mean)
+           }
          }
        }
      }
@@ -3491,6 +3608,11 @@ extract.features <- function(ret, s = "lambda.min") {
                           if(!grepl(col, pattern="IncMSE")) { stop(paste0("Was expected ", col, " to be %IncMSE\n")) }
                           coeffs <- importance(df$fit)[,1,drop=FALSE]
                         },
+                        "crf" = {
+                          imp <- varimp(df$fit, nperm = 5, conditional = TRUE)
+                          coeffs <- data.frame(vi = imp)
+                          rownames(coeffs) <- names(imp)
+                        },
                         { stop(paste0("Unknown model ", df$model, "\n")) })
                                          ns <- rownames(coeffs)
                                          coeffs <- as.vector(coeffs)
@@ -3531,6 +3653,11 @@ extract.all.features <- function(ret, s = "lambda.min") {
                           if(!grepl(col, pattern="IncMSE")) { stop(paste0("Was expected ", col, " to be %IncMSE\n")) }
                           coeffs <- importance(df$fit)[,1,drop=FALSE]
                         },
+                        "crf" = {
+                          imp <- varimp(df$fit, nperm = 5, conditional = TRUE)
+                          coeffs <- data.frame(vi = imp)
+                          rownames(coeffs) <- names(imp)
+                        },
                         { stop(paste0("Unknown model ", df$model, "\n")) })
                                          ns <- rownames(coeffs)
                                          coeffs <- as.vector(coeffs)
@@ -3560,6 +3687,7 @@ extract.predicted.actual <- function(ret, train.drug, alpha, s, model) {
                 ret <- NULL
                 if(!is.na(df$predicted) && (class(df$predicted) != "logical") && (df$n.test > 0)) {
                   if(df$model != "rf") {
+## Including "crf" here
                     ret <- data.frame(train.drug = df$train.drug, test.drug = df$test.drug, alpha = df$alpha, s = df$s, model = df$model, actual = df$actual, predicted = df$predicted[,1], sample.names = rownames(df$predicted))
                   } else {
                     ret <- data.frame(train.drug = df$train.drug, test.drug = df$test.drug, alpha = NA, s = NA, model = df$model, actual = as.vector(df$actual), predicted = as.vector(unname(df$predicted)), sample.names = as.vector(names(df$predicted)))
@@ -3588,11 +3716,31 @@ extract.results <- function(ret) {
                 if(!is.na(df$predicted) && (class(df$predicted) != "logical") && (df$n.test > 0)) {
                   method <- "pearson"
 ##                  ct <- cor.test(df$predicted, df$actual, method = method)
-                  ret <- tryCatch({ ct <- cor.test(df$predicted, df$actual, method = method); data.frame(val = ct$estimate, pval = ct$p.value, train.drug = df$train.drug, test.drug = df$test.drug, alpha = df$alpha, s = df$s, model = df$model, metric = method, n.test = df$n.test) }, error = function(e) { data.frame(val = NA, pval = NA, train.drug = df$train.drug, test.drug = df$test.drug, alpha = df$alpha, s = df$s, model = df$model, metric = "pearson", n.test = df$n.test) })
+                  ret <- tryCatch({ ct <- cor.test(df$predicted, df$actual, method = method); data.frame(val = ct$estimate, pval = ct$p.value, train.drug = df$train.drug, test.drug = df$test.drug, alpha = df$alpha, s = df$s, model = df$model, metric = method, n.test = df$n.test) }, 
+                                  error = function(e) { 
+                                            ## cor.test will fail if the predicted values are all the same (i.e., just an intercept)
+                                            ## If covariance is zero, cor = 0/0.  Define this as zero.
+                                            cv <- tryCatch({ cov(df$predicted, df$actual, method = method) }, error = function(e) NA)
+                                            data.frame(val = cv, pval = NA, train.drug = df$train.drug, test.drug = df$test.drug, alpha = df$alpha, s = df$s, model = df$model, 
+                                                       metric = method, n.test = df$n.test) 
+                                  })
+                  if( cov(df$predicted, df$actual, method = method) == 0 ) {
+                    ret$val <- 0
+                   }
                   method <- "spearman"
 ##                  ct <- cor.test(df$predicted, df$actual, method = method)
 ##                  ret2 <- data.frame(val = ct$estimate, pval = ct$p.value, train.drug = df$train.drug, test.drug = df$test.drug, alpha = df$alpha, s = df$s, model = df$model, metric = method, n.test = df$n.test)
-                  ret2 <- tryCatch({ ct <- cor.test(df$predicted, df$actual, method = method); data.frame(val = ct$estimate, pval = ct$p.value, train.drug = df$train.drug, test.drug = df$test.drug, alpha = df$alpha, s = df$s, model = df$model, metric = method, n.test = df$n.test) }, error = function(e) { data.frame(val = NA, pval = NA, train.drug = df$train.drug, test.drug = df$test.drug, alpha = df$alpha, s = df$s, model = df$model, metric = "spearman", n.test = df$n.test) })
+                  ret2 <- tryCatch({ ct <- cor.test(df$predicted, df$actual, method = method); data.frame(val = ct$estimate, pval = ct$p.value, train.drug = df$train.drug, test.drug = df$test.drug, alpha = df$alpha, s = df$s, model = df$model, metric = method, n.test = df$n.test) }, 
+                                  error = function(e) { 
+                                            ## cor.test will fail if the predicted values are all the same (i.e., just an intercept)
+                                            ## If covariance is zero, cor = 0/0.  Define this as zero.
+                                            cv <- tryCatch({ cov(df$predicted, df$actual, method = method) }, error = function(e) NA)
+                                            data.frame(val = cv, pval = NA, train.drug = df$train.drug, test.drug = df$test.drug, alpha = df$alpha, s = df$s, model = df$model, 
+                                                       metric = method, n.test = df$n.test) 
+                                  })
+                  if( cov(df$predicted, df$actual, method = method) == 0 ) {
+                    ret2$val <- 0
+                   }
                   mse <- mean((df$predicted-df$actual)^2)
                   ret3 <- data.frame(val = mse, pval = NA, train.drug = df$train.drug, test.drug = df$test.drug, alpha = df$alpha, s = df$s, model = df$model, metric = "mse", n.test = df$n.test)
                   ret <- rbind(ret, ret2, ret3)

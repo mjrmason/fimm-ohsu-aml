@@ -9,7 +9,7 @@ suppressPackageStartupMessages(library("drc"))
 ## e.g., in OHSU this is c("patient_id", "inhibitor", "lab_id", "replicant", "time_of_read"),
 ## outlier.col gives the column within data that indicates whether the individual response should be excluded
 ## as an outlier (TRUE) or not (FALSE).  If outlier.col is NULL, no outliers are excluded
-fit.drc <- function(data, fct = "LL.4", drug.screen.cols = NULL, conc.nM.col = NULL, response.col = NULL, response.is.viability = FALSE, outlier.col = NULL) {
+fit.drc <- function(data, fct = "LL.4", drug.screen.cols = NULL, conc.nM.col = NULL, response.col = NULL, response.is.viability = FALSE, outlier.col = NULL, compute.auc = TRUE) {
   ddply(data,
         drug.screen.cols,
         .parallel = TRUE,
@@ -79,10 +79,12 @@ fit.drc <- function(data, fct = "LL.4", drug.screen.cols = NULL, conc.nM.col = N
             c.param <- coef(fit)[2]
             d.param <- coef(fit)[3]
             e.param <- coef(fit)[4]
-            if(fct == "LL.4") {
-              auc <- compute.ll.4.auc(b.param, c.param, d.param, e.param, min.conc, max.conc)
-            } else {
-              auc <- compute.l.4.auc(b.param, c.param, d.param, e.param, min.conc, max.conc, numerical = FALSE) 
+            if(compute.auc) { 
+              if(fct == "LL.4") {
+                auc <- compute.ll.4.auc(b.param, c.param, d.param, e.param, min.conc, max.conc)
+              } else {
+                auc <- compute.l.4.auc(b.param, c.param, d.param, e.param, min.conc, max.conc, numerical = FALSE) 
+              }
             }
           }
           vec <- c(converged, b.param, c.param, d.param, e.param, gof, auc, min.conc, max.conc, all.concs, uniq.concs, all.responses, 

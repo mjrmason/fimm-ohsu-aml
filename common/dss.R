@@ -286,6 +286,64 @@ compute.ctrp.dss <- function(b, h, alpha, beta, t = 0, min.conc, max.conc) {
 ## and DSS1, DSS2, and DSS3 as "dss1", "dss2", and "dss3", respectively.
 ## NB: dss.auc is the DSS calculated between min.conc and max.conc
 ## NB: min.conc/max.conc are in nMol (real, not log, space)
+compute.ll.4.aucs <- function(b.param, c.param, d.param, e.param, min.conc, max.conc, auc.output.col = "auc", shifted.auc.output.col = "shifted.auc") {
+  ## FIMM defines logistic (not log-logistic) function as:
+  ## f(x) = d + ( a - d ) * [ 1 + 10^(b * c - b * x) ]^-1   (Yadav Eq. 1)
+  ## 
+  ## LL.4 in DRC is:
+  ## f(x) = c' + ( d' - c' ) / ( 1 + exp(b' * log(x) - b' * log(e')) )  (LL.4 Eq. 1)
+  ## Input parameters are defined in terms of LL.4.  i.e., b.param = b'
+
+  ## a = d' = max.asymptote
+  ## d = c' = min.asymptote
+  ## c = e' = ic50
+  ## The interpretation of the slop/b/b' is different between the two
+  ## models, but not needed to calculate dss.
+
+  ## LL.4 in DRC is:
+  ## f(x) = c + \frac{d-c}{1+\exp(b(\log(x)-\log(e)))}
+  ## f(x) = c + ( d - c ) / ( 1 + exp(b * log(x) - b * log(f)) )
+  ## FIMM/Yadav defines x1 as (Eq. 4), but this is defined for the logistic function:
+  ## x1 = c - (1/b) * [ log10(a - t) - log10(t - d) ] 
+  ## This comes from inverting (Yadav Eq. 1) above.  
+  ## Similarly, inverting LL.4 Eq. 1 above gives:
+  ## x1 = e' * exp{ (1/b') * [ log(d' - t) - log(t - c') ] }
+  ## Begin the integration at x1(y=t)
+
+  ## Determine the lower limit of integration.
+  x1 <- min.conc
+  if(!is.finite(x1)) {
+    vec <- c(NA, NA)
+    names(vec) <- c(auc.output.col, shifted.auc.output.col)
+    return(vec)
+  }
+  x1 <- max(x1, min.conc)
+
+  ## Compute AUC to be used for DSS.  It should be calculated between x1 and max.conc.
+  auc <- tryCatch({compute.ll.4.auc(b.param, c.param, d.param, e.param, x1, max.conc)},
+                      error = function(e) { NA })
+  if(!is.finite(auc)) {
+    vec <- c(NA, NA)
+    names(vec) <- c(auc.output.col, shifted.auc.output.col)
+    return(vec)
+  }
+
+  ## Subtract off the area/rectangle "below" the lower asymptote (between y = 0 and
+  ## the y value of the lower asymptote) and between the x limits of integration
+  ## x1 to max.conc
+  ## NB: we are taking the lesser of the "lower" and "upper" asymptotes from the
+  ## original fit (not at the truncated range of integration)
+  y.low <- c.param
+  y.high <- d.param
+  y.asym <- min(y.low, y.high)
+  y0 <- 0
+  shifted.auc <- auc - ( ( y.asym - y0 ) * ( max.conc - x1 ) )
+
+  vec <- c(auc, shifted.auc)
+  names(vec) <- c(auc.output.col, shifted.auc.output.col)	
+  return(vec)
+}
+
 compute.ll.4.dss <- function(b.param, c.param, d.param, e.param, t = 0, min.conc, max.conc) {
   ## FIMM defines logistic (not log-logistic) function as:
   ## f(x) = d + ( a - d ) * [ 1 + 10^(b * c - b * x) ]^-1   (Yadav Eq. 1)
@@ -418,7 +476,110 @@ compute.l.4.dss <- function(b.param, c.param, d.param, e.param, t = 0, min.conc,
   return(vec)
 }
 
-compute.all.dss <- function(data, t = 0, fct = "LL.4") {
+compute.l.4.aucs <- function(b.param, c.param, d.param, e.param, min.conc, max.conc, numerical = TRUE, auc.output.col = "auc", shifted.auc.output.col = "shifted.auc") {
+  ## FIMM defines logistic (not log-logistic) function as:
+  ## f(x) = d + ( a - d ) * [ 1 + 10^(b * c - b * x) ]^-1   (Yadav Eq. 1)
+  ## 
+  ## L.4 in DRC is:
+  ## f(x) = c' + ( d' - c' ) / ( 1 + exp(b' * x - b' * e') )  (L.4 Eq. 1)
+  ## Input parameters are defined in terms of L.4.  i.e., b.param = b'
+  ## a = d' = max.asymptote
+  ## d = c' = min.asymptote
+  ## c = e' = ic50
+  ## b' = - b log(10)
+
+  ## FIMM/Yadav defines x1 as (Eq. 4), which is defined for the logistic function (Yadav Eq. 1)
+  ## x1 = c - (1/b) * [ log10(a - t) - log10(t - d) ]   (Yadav Eq. 4)
+  ## This comes from inverting (Yadav Eq. 1) above.  
+  ## 
+  ## Similarly, inverting L.4 Eq. 1 (and/or plugging the above substitutions into Yadav Eq. 4) gives:
+  ## x1 = e' + (1/b') * [ log(d' - t) - log(t - c') ]
+  ## (i.e., x1 = e' + [ log(10) / b' ] * [ log10(d' - t) - log10(t - c') ], recalling that log10(x) = log(x) / log(10) )
+  ## Begin the integration at x1(y=t)
+
+  ## Determine the lower limit of integration.
+  x1 <- min.conc
+  if(!is.finite(x1)) {
+    vec <- c(NA, NA)
+    names(vec) <- c(auc.output.col, shifted.auc.output.col)	
+    return(vec)
+  }
+  x1 <- max(x1, min.conc)
+
+  ## Compute AUC to be used for DSS.  It should be calculated between x1 and max.conc.
+  auc <- tryCatch({compute.l.4.auc(b.param, c.param, d.param, e.param, x1, max.conc, numerical = numerical)},
+                      error = function(e) { NA })
+  if(!is.finite(auc)) {
+    vec <- c(NA, NA)
+    names(vec) <- c(auc.output.col, shifted.auc.output.col)	
+    return(vec)
+  }
+
+  ## Subtract off the area/rectangle "below" the lower asymptote (between y = 0 and
+  ## the y value of the lower asymptote) and between the x limits of integration
+  ## x1 to max.conc.
+  ## NB: we are taking the lesser of the "lower" and "upper" asymptotes from the
+  ## original fit (not at the truncated range of integration)
+  shifted.auc <- auc
+  y.asym <- min(c.param, d.param)
+  y0 <- 0
+  if(TRUE) {
+    shifted.auc <- auc - ( ( y.asym - y0 ) * ( max.conc - x1 ) )
+  } else {
+    ## This does the same thing via brute force
+    y.asym <- min(c.param, d.param)
+    delta <- y.asym - y0
+    ## Shift the lower asymptote to zero
+    c.param <- c.param - delta  
+    d.param <- d.param - delta  
+    shifted.auc <- tryCatch({compute.l.4.auc(b.param, c.param, d.param, e.param, x1, max.conc, numerical = numerical)},
+                            error = function(e) { NA })
+  }
+  vec <- c(auc, shifted.auc)
+  names(vec) <- c(auc.output.col, shifted.auc.output.col)	
+  return(vec)
+}
+
+compute.all.auc <- function(data, fct = "LL.4", min.conc.col = "min.conc", max.conc.col = "max.conc", b.param.col = "b", c.param.col = "c", d.param.col = "d", e.param.col = "e", converged.col = "converged", auc.output.col = "auc", shifted.auc.output.col = "shifted.auc") {
+  res <- ddply(data,
+               colnames(data), 
+               .parallel = TRUE,
+               .fun = function(df) {
+                 if(nrow(df) != 1) { stop("Expected to process one row\n") }
+                 if(is.na(df[1, converged.col])) {
+                   vec <- c(NA, NA)
+                   names(vec) <- c(auc.output.col, shifted.auc.output.col)
+                   return(vec)
+                 }
+                 converged <- as.numeric(df[1, converged.col])
+                 vec <- c(NA, NA)
+                 names(vec) <- c(auc.output.col, shifted.auc.output.col)
+                 if(converged == 1) {
+                   b.param <- as.numeric(df[1, b.param.col])
+                   c.param <- as.numeric(df[1, c.param.col])
+                   d.param <- as.numeric(df[1, d.param.col])
+                   e.param <- as.numeric(df[1, e.param.col])
+                   min.conc <- as.numeric(df[1, min.conc.col])
+                   max.conc <- as.numeric(df[1, max.conc.col])
+                   vec <- tryCatch({
+                              if(fct == "LL.4") {
+                                compute.ll.4.aucs(b.param, c.param, d.param, e.param, min.conc, max.conc, auc.output.col = auc.output.col, shifted.auc.output.col = shifted.auc.output.col)
+                              } else {
+                                compute.l.4.aucs(b.param, c.param, d.param, e.param, min.conc, max.conc, numerical = FALSE, auc.output.col = auc.output.col, shifted.auc.output.col = shifted.auc.output.col) 
+                              }
+                            }, 
+                            error = function(e) {
+                              vec <- c(NA, NA)
+                              names(vec) <- c(auc.output.col, shifted.auc.output.col)
+                              vec    
+                            })
+                   }
+                   vec
+                 })
+  res
+}
+
+compute.all.dss <- function(data, t = 0, fct = "LL.4", min.conc.col = "min.conc", max.conc.col = "max.conc") {
   res <- ddply(data,
                colnames(data), 
                .parallel = TRUE,
@@ -432,8 +593,8 @@ compute.all.dss <- function(data, t = 0, fct = "LL.4") {
                    c.param <- as.numeric(df$c[1])
                    d.param <- as.numeric(df$d[1])
                    e.param <- as.numeric(df$e[1])
-                   min.conc <- as.numeric(df$min.conc[1])
-                   max.conc <- as.numeric(df$max.conc[1])
+                   min.conc <- as.numeric(df[1, min.conc.col])
+                   max.conc <- as.numeric(df[1, max.conc.col])
                    vec <- tryCatch({
                               if(fct == "LL.4") {
                                 compute.ll.4.dss(b.param, c.param, d.param, e.param, t = t, min.conc, max.conc)

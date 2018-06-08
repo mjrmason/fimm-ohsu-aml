@@ -32,19 +32,19 @@ if(!is.na(num.cores) && (num.cores > 1)) {
 
 ## Read in FIMM raw drug response data
 synId <- "syn8488824"
-obj <- synGet(id=synId, downloadFile = TRUE, downloadLocation = download.path)
+obj <- synGet(id=synId, downloadFile = TRUE)
 file <- getFileLocation(obj)
 fimm.raw.dr <- read.xlsx(file)
 
 ## Read in FIMM drug annotations
 synId <- "syn8434109"
-obj <- synGet(id=synId, downloadFile = TRUE, downloadLocation = download.path)
+obj <- synGet(id=synId, downloadFile = TRUE)
 file <- getFileLocation(obj)
 fimm.drug.annotations <- read.xlsx(file)
 
 ## Read in the subset of drug annotations in both FIMM and OHSU
 synId <- "syn9731315"
-obj <- synGet(id=synId, downloadFile = TRUE, downloadLocation = download.path)
+obj <- synGet(id=synId, downloadFile = TRUE)
 ohsu.fimm.drugs <- openxlsx:::read.xlsx(getFileLocation(obj), sheet=1)
 
 mek.ohsu.fimm.drugs <- ohsu.fimm.drugs[grepl(ohsu.fimm.drugs$`Mechanism/Targets`, pattern="MEK"),]
@@ -53,7 +53,7 @@ mek.ohsu.fimm.drugs <- ohsu.fimm.drugs[grepl(ohsu.fimm.drugs$`Mechanism/Targets`
 ## inhibitor_data_points_2017_01_12.txt
 ## This latest file seems to have data from the prior releases
 synId <- "syn8149180"
-inh.obj <- synGet(synId, downloadFile=TRUE, downloadLocation = download.path)
+inh.obj <- synGet(synId, downloadFile=TRUE)
 ohsu.inh.tbl <- fread(getFileLocation(inh.obj))
 ohsu.inh.tbl <- as.data.frame(ohsu.inh.tbl)
 
@@ -84,9 +84,20 @@ lines.LL.4.curve <- function(slope, min.asymptote, max.asymptote, ic50, x.min, x
   lines(log10(x.seq), y, type="l")
 }
 
+shade.LL.4.curve <- function(slope, min.asymptote, max.asymptote, ic50, x.min, x.max) {
+  x.seq <- seq(from = x.min, to = x.max, by = 0.01)
+  b <- slope
+  c <- min.asymptote
+  d <- max.asymptote
+  e <- ic50
+  y <- unlist(lapply(x.seq, function(x) {
+    c + ( (d-c)/(1+exp(b*(log(x)-log(e)))) )
+  }))
+  polygon(c(min(log10(x.seq)), log10(x.seq)), c(min(y), y))
+}
+
 library(drc)
 dat <- subset(mek.fimm.raw.tbl, SCREEN_ID == mek.fimm.raw.tbl$SCREEN_ID[1])
-
 ## drc.fit <- drm(normalized_viability ~ well_concentration, data = h, fct=LL.4(fixed = c(NA, NA, NA,NA), names = c("SLOPE","MIN","MAX","IC50")))
 
 drc.fit <- drm(100 - PERCENT_INHIBITION ~ CONCENTRATION, data = dat, fct=LL.4(fixed = c(NA, NA, NA,NA), names = c("SLOPE","MIN","MAX","IC50")))

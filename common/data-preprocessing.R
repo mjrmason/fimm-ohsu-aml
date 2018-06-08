@@ -103,8 +103,8 @@ prepare.drug.response.and.expr.matrices <- function(drc.df, expr.df, drugs, drug
 
   drc.df <- prepare.drug.response.matrix(drc.df, drug.col, patient.col, response.col, drugs = drugs)
   ## Restrict X and response to be over the same samples
+  colnames(drc.df) <- make.names(colnames(drc.df))
   if(!is.null(expr.df) && !is.na(expr.df)) {
-    colnames(drc.df) <- make.names(colnames(drc.df))
     colnames(expr.df) <- make.names(colnames(expr.df))
     common.samples <- intersect(colnames(drc.df), colnames(expr.df))
     cat(paste0("Samples with both expression and drug assays: ", length(common.samples), "\n"))

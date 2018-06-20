@@ -2,6 +2,47 @@ suppressPackageStartupMessages(library(gtable))
 suppressPackageStartupMessages(library(grid))
 suppressPackageStartupMessages(library(gridExtra))
 
+output.correlations <- function(ds, processed.exprs, processed.drcs, drug.to.feature.map, drug.feature.name.to.id.map, drug.ranges, prefix, title) {
+  samples <- intersect(colnames(processed.exprs[[ds]]), colnames(processed.drcs[[ds]]))
+  l_ply(1:nrow(drug.to.feature.map),
+        .fun = function(i) {
+                 drug.id <- drug.to.feature.map$drug[i]
+                 drug.name <- drug.to.feature.map$drug.name[i]
+                 feature.name <- drug.to.feature.map$features[i]
+                 if(!(feature.name %in% names(drug.feature.name.to.id.map))) { return() }
+                 features <- drug.feature.name.to.id.map[[feature.name]]
+                 features <- na.omit(features)
+                 if(nrow(features) == 0) { return() }
+                 features <- features[features$id %in% rownames(processed.exprs[[ds]]),]
+                 if(nrow(features) == 0) { return() }
+  print(features)
+                 lst <- llply(1:nrow(features),
+                              .fun = function(indx) {
+                                       gene.id <- features$id[indx]
+                                       if(!(gene.id %in% rownames(processed.exprs[[ds]]))) { return(NULL) }
+                                       if(!(drug.id %in% rownames(processed.drcs[[ds]]))) { return(NULL) }
+                                       gene.name <- features$name[indx]
+                                       flag <- !is.na(processed.exprs[[ds]][gene.id, samples]) & !is.na(processed.drcs[[ds]][drug.id, samples])
+                                       if(length(which(flag)) == 0) { return(NULL) }
+                                       gene.expr <- scale(as.numeric(processed.exprs[[ds]][gene.id,samples]))
+                                       drug.resp <- scale(as.numeric(processed.drcs[[ds]][drug.id,samples]))
+                                       g <- plot.correlation(gene.expr, drug.resp, display.pval = TRUE, size = 6, colour = "blue")
+                                       g <- g + ylab(paste("Drug Response", collapse=" "))
+                                       g <- g + xlab(paste(gene.name, "Expression", collapse=" "))
+                                       g <- g + theme(text = element_text(size = 15))
+                                       g
+                              })
+                 pg <- plot_grid(plotlist = lst, labels = LETTERS[1:length(lst)])
+                 min.conc <- as.numeric(drug.ranges$min.conc.nM[drug.ranges$drug.name == drug.name])
+                 max.conc <- as.numeric(drug.ranges$max.conc.nM[drug.ranges$drug.name == drug.name])
+                 title <- ggdraw() + draw_label(paste(title, drug.name, "vs", feature.name, "biomarkers (", min.conc, "-", max.conc, "nM)", sep = " "))
+                 pg <- plot_grid(title, pg, ncol=1, rel_heights=c(0.1, 1)) # rel_heights values control title margin
+                 pg
+                 file <- paste0(prefix, "-", make.names(drug.name), "-vs-", make.names(feature.name), "-biomarkers.pdf")
+                 ggsave(file, width = 14)
+         })
+}      
+
 scatterplot <- function(ds1, drug1, ds2, drug2, save.to.pdf = TRUE, use.smooth = FALSE, alpha = 0, model = "glmnet", ...) {
   par(pty = "s")  
   foo <- extract.fit(res.aucs[[1]][["all.fits"]][[ds1]][["gene"]], train.drug = drug1, alpha = alpha, model = model)

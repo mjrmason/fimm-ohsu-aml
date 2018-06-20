@@ -221,7 +221,7 @@ find.extremal.responses.qqplots_ <- function(drug.data.long, response.col) {
   return(list("min.response" = min.response, "max.response" = max.response))
 }
 
-annotate.drug.response.outliers_ <- function(drug.data.long, response.col, min.response, max.response) {
+annotate.drug.response.outliers.min.max_ <- function(drug.data.long, response.col, min.response, max.response) {
   drug.data.long$outlier.response <- FALSE
   flag <- is.na(drug.data.long[, response.col]) | ( drug.data.long[, response.col] < min.response ) | ( drug.data.long[, response.col] > max.response )
   drug.data.long$outlier.response[flag] <- TRUE
